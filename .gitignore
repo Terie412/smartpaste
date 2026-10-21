@@ -6,7 +6,9 @@
 *.lib
 
 # ---- 本地调试产物 ----
-# scripts/shot_overlay.py 等手工截的遮罩截图，不进仓库
+# temp/ 放开发期的调试脚本、临时截图、一次性工具，
+# 全是本机专用、依赖本地路径的东西，不进仓库
+/temp/
 assets/_*.png
 /probe/
 *.log

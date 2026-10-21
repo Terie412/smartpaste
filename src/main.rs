@@ -4,6 +4,7 @@
 mod capture;
 mod clipboard;
 mod edit;
+mod gdiplus;
 mod icon;
 mod icons;
 mod overlay;
@@ -36,6 +37,8 @@ const IDM_SNAP: usize = 1001;
 const IDM_EXIT: usize = 1002;
 
 fn main() {
+    gdiplus::startup();
+
     unsafe {
         use windows_sys::Win32::UI::HiDpi::{
             SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,

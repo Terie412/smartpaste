@@ -16,10 +16,10 @@ use crate::win::{delete_font, hinstance, pt_in, rect, to_wide, ui_font};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, Ellipse, EndPaint, FillRect, GetDC, GetStockObject,
+    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject,
     GetTextExtentPoint32W, InvalidateRect, IntersectClipRect, Rectangle, ReleaseDC, RestoreDC,
-    RoundRect, SaveDC, SelectObject, SetBkMode, SetTextColor, TextOutW, AC_SRC_OVER, BLENDFUNCTION,
-    HDC, HFONT, HGDIOBJ, NULL_BRUSH, NULL_PEN, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    SaveDC, SelectObject, SetBkMode, SetTextColor, TextOutW, AC_SRC_OVER, BLENDFUNCTION,
+    HDC, HFONT, HGDIOBJ, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_ESCAPE, VK_RETURN, VK_S,
@@ -44,17 +44,29 @@ pub const WM_SNAP_DONE: u32 = WM_APP + 2;
 const CLASS_NAME: &str = "SmartPasteOverlay";
 const MASK_ALPHA: u8 = 128;
 
-// RoundRect 的后两个参数是圆角椭圆的宽高，也就是半径的两倍
-const RADIUS_BAR: i32 = 16;
-const RADIUS_CHIP: i32 = 12;
+/// UI 整体缩放。所有尺寸都过这个函数，改一处全跟着变。
+///
+/// 用 8/5 这种整数比而不是 f32：`const` 里的浮点运算限制多，
+/// 而且整数算出来的结果稳定，不会因为平台差异抖动。
+const UI_SCALE: (i32, i32) = (8, 5);
 
-const BTN_W: i32 = 48;
-const BTN_H: i32 = 34;
-const GAP: i32 = 8;
+const fn ui(v: i32) -> i32 {
+    v * UI_SCALE.0 / UI_SCALE.1
+}
 
-/// 属性条上一格的大小
-const PROP_W: i32 = 30;
-const PROP_H: i32 = 34;
+// 圆角直径（GDI+ 里再除以 2 得到半径）
+const RADIUS_BAR: i32 = ui(16);
+const RADIUS_CHIP: i32 = ui(12);
+
+const BTN_W: i32 = ui(48);
+const BTN_H: i32 = ui(34);
+const GAP: i32 = ui(8);
+
+/// 属性条上一格的大小。
+/// 取 44 而不是 ui(30)=48：最多 12 格时 12*44=528，
+/// 刚好和工具栏的 7*76=532 对齐，两行左边缘不会错开
+const PROP_W: i32 = 44;
+const PROP_H: i32 = ui(34);
 
 /// 预设色（COLORREF：0x00BBGGRR）
 const COLORS: [u32; 6] = [
@@ -288,11 +300,11 @@ impl Overlay {
             x = 0;
         }
         let mut y = sel.bottom + GAP;
-        if y + BTN_H + 4 > self.screen.height {
+        if y + BTN_H + ui(4) > self.screen.height {
             y = sel.top - BTN_H - GAP;
         }
         if y < 4 {
-            y = (sel.bottom + GAP).min(self.screen.height - BTN_H - 4);
+            y = (sel.bottom + GAP).min(self.screen.height - BTN_H - ui(4));
         }
 
         for (act, icon) in items {
@@ -577,15 +589,9 @@ unsafe fn blend(mask_dc: HDC, dst: HDC, l: i32, t: i32, r: i32, b: i32) {
     AlphaBlend(dst, l, t, r - l, b - t, mask_dc, 0, 0, 1, 1, bf);
 }
 
-/// 圆角填充，无边框。
+/// 圆角填充，无边框。走 GDI+ 拿抗锯齿。
 unsafe fn round_fill(dc: HDC, r: &RECT, dia: i32, color: u32) {
-    let brush = CreateSolidBrush(color);
-    let old_pen = SelectObject(dc, GetStockObject(NULL_PEN) as HGDIOBJ);
-    let old_brush = SelectObject(dc, brush as HGDIOBJ);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, dia, dia);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as HGDIOBJ);
+    crate::gdiplus::fill_round(dc, r, dia as f32 / 2.0, color);
 }
 
 /// 圆角描边，不填充。
@@ -593,15 +599,9 @@ unsafe fn round_stroke(dc: HDC, r: &RECT, dia: i32, color: u32) {
     round_stroke_w(dc, r, dia, color, 1);
 }
 
-/// 圆角描边，可以指定线宽。
+/// 圆角描边，可以指定线宽。同样走 GDI+。
 unsafe fn round_stroke_w(dc: HDC, r: &RECT, dia: i32, color: u32, w: i32) {
-    let pen = CreatePen(PS_SOLID, w, color);
-    let old_pen = SelectObject(dc, pen as HGDIOBJ);
-    let old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH) as HGDIOBJ);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, dia, dia);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(pen as HGDIOBJ);
+    crate::gdiplus::stroke_round(dc, r, dia as f32 / 2.0, color, w as f32);
 }
 
 /// 选区边框：外面 1px 黑、里面 1px 白。
@@ -629,14 +629,14 @@ unsafe fn draw_size_label(hdc: HDC, s: &RECT, font: HFONT) {
     let mut size: windows_sys::Win32::Foundation::SIZE = std::mem::zeroed();
     GetTextExtentPoint32W(hdc, wide.as_ptr(), (wide.len() - 1) as i32, &mut size);
 
-    let (pad_x, pad_y) = (8, 4);
+    let (pad_x, pad_y) = (ui(8), ui(4));
     let bw = size.cx + pad_x * 2;
     let bh = size.cy + pad_y * 2;
     let bx = s.left;
-    let by = if s.top >= bh + 6 {
-        s.top - bh - 6
+    let by = if s.top >= bh + ui(6) {
+        s.top - bh - ui(6)
     } else {
-        s.top + 6
+        s.top + ui(6)
     };
 
     let bg = rect(bx, by, bx + bw, by + bh);
@@ -669,7 +669,7 @@ unsafe fn draw_bar(
     if split < buttons.len() {
         let sep_brush = CreateSolidBrush(rgb(0xD0, 0xD0, 0xD6));
         let x = buttons[split].rect.left;
-        let sep = rect(x, bar.top + 8, x + 1, bar.bottom - 8);
+        let sep = rect(x, bar.top + ui(8), x + 1, bar.bottom - ui(8));
         FillRect(dc, &sep, sep_brush);
         DeleteObject(sep_brush as HGDIOBJ);
     }
@@ -684,21 +684,21 @@ unsafe fn draw_bar(
             // 选中：比悬停块大一圈，再加 2px 深色边框，
             // 光靠浅灰底在白工具栏上看不出来
             let r = rect(
-                b.rect.left + 2,
-                b.rect.top + 2,
-                b.rect.right - 2,
-                b.rect.bottom - 2,
+                b.rect.left + ui(2),
+                b.rect.top + ui(2),
+                b.rect.right - ui(2),
+                b.rect.bottom - ui(2),
             );
             round_fill(dc, &r, RADIUS_CHIP, rgb(0xED, 0xED, 0xF2));
-            round_stroke_w(dc, &r, RADIUS_CHIP, rgb(0x2E, 0x2E, 0x36), 2);
+            round_stroke_w(dc, &r, RADIUS_CHIP, rgb(0x2E, 0x2E, 0x36), ui(2));
         } else if hover == idx || pressed == idx {
             round_fill(
                 dc,
                 &rect(
-                    b.rect.left + 2,
-                    b.rect.top + 3,
-                    b.rect.right - 2,
-                    b.rect.bottom - 3,
+                    b.rect.left + ui(2),
+                    b.rect.top + ui(3),
+                    b.rect.right - ui(2),
+                    b.rect.bottom - ui(3),
                 ),
                 RADIUS_CHIP,
                 rgb(0xF1, 0xF1, 0xF5),
@@ -749,7 +749,7 @@ unsafe fn draw_props(
 
         if *prop == Prop::Sep {
             let b = CreateSolidBrush(rgb(0xD8, 0xD8, 0xDE));
-            let sep = rect(cx, r.top + 10, cx + 1, r.bottom - 10);
+            let sep = rect(cx, r.top + ui(10), cx + 1, r.bottom - ui(10));
             FillRect(dc, &sep, b);
             DeleteObject(b as HGDIOBJ);
             continue;
@@ -758,7 +758,12 @@ unsafe fn draw_props(
         if hover_prop == i as i32 {
             round_fill(
                 dc,
-                &rect(r.left + 2, r.top + 3, r.right - 2, r.bottom - 3),
+                &rect(
+                    r.left + ui(2),
+                    r.top + ui(3),
+                    r.right - ui(2),
+                    r.bottom - ui(3),
+                ),
                 RADIUS_CHIP,
                 rgb(0xF1, 0xF1, 0xF5),
             );
@@ -767,13 +772,18 @@ unsafe fn draw_props(
         match *prop {
             Prop::Color(idx) => {
                 let sel = style.color == COLORS[idx];
-                let d = rect(cx - 9, cy - 9, cx + 9, cy + 9);
+                let d = rect(cx - ui(9), cy - ui(9), cx + ui(9), cy + ui(9));
                 round_fill(dc, &d, 8, COLORS[idx]);
                 if sel {
                     round_stroke(
                         dc,
-                        &rect(d.left - 3, d.top - 3, d.right + 3, d.bottom + 3),
-                        10,
+                        &rect(
+                            d.left - ui(3),
+                            d.top - ui(3),
+                            d.right + ui(3),
+                            d.bottom + ui(3),
+                        ),
+                        RADIUS_CHIP,
                         rgb(0x2A, 0x2A, 0x30),
                     );
                 } else {
@@ -783,41 +793,41 @@ unsafe fn draw_props(
             Prop::Width(idx) => {
                 let sel = style.width == tool.width_at(idx);
                 // 显示粗细按档位序号放大，跟实际像素脱钩，三档才分得开
-                let shown = 2 + idx as i32 * 2;
+                let shown = ui(2) + idx as i32 * ui(2);
                 let c = if sel { ON } else { OFF };
                 let pen = CreatePen(PS_SOLID, shown, rgb(c.0, c.1, c.2));
                 let old = SelectObject(dc, pen as HGDIOBJ);
-                MoveToEx(dc, cx - 9, cy, std::ptr::null_mut());
-                LineTo(dc, cx + 9, cy);
+                MoveToEx(dc, cx - ui(9), cy, std::ptr::null_mut());
+                LineTo(dc, cx + ui(9), cy);
                 SelectObject(dc, old);
                 DeleteObject(pen as HGDIOBJ);
                 if sel {
                     round_stroke_w(
                         dc,
-                        &rect(cx - 11, cy - 11, cx + 11, cy + 11),
-                        8,
+                        &rect(cx - ui(11), cy - ui(11), cx + ui(11), cy + ui(11)),
+                        RADIUS_CHIP,
                         rgb(0x2E, 0x2E, 0x36),
                         2,
                     );
                 }
             }
             Prop::Filled => {
-                let b = rect(cx - 8, cy - 8, cx + 8, cy + 8);
+                let b = rect(cx - ui(8), cy - ui(8), cx + ui(8), cy + ui(8));
                 if style.filled {
-                    round_fill(dc, &b, 4, rgb(ON.0, ON.1, ON.2));
+                    round_fill(dc, &b, RADIUS_CHIP, rgb(ON.0, ON.1, ON.2));
                 } else {
-                    round_stroke(dc, &b, 4, rgb(OFF.0, OFF.1, OFF.2));
+                    round_stroke(dc, &b, RADIUS_CHIP, rgb(OFF.0, OFF.1, OFF.2));
                 }
             }
             Prop::Dashed => {
                 let c = if style.dashed { ON } else { OFF };
-                let pen = CreatePen(PS_SOLID, 2, rgb(c.0, c.1, c.2));
+                let pen = CreatePen(PS_SOLID, ui(2), rgb(c.0, c.1, c.2));
                 let old = SelectObject(dc, pen as HGDIOBJ);
                 if style.dashed {
                     for k in 0..3 {
-                        let x0 = cx - 9 + k * 7;
+                        let x0 = cx - ui(9) + k * ui(7);
                         MoveToEx(dc, x0, cy, std::ptr::null_mut());
-                        LineTo(dc, x0 + 4, cy);
+                        LineTo(dc, x0 + ui(4), cy);
                     }
                 } else {
                     MoveToEx(dc, cx - 9, cy, std::ptr::null_mut());
@@ -829,24 +839,21 @@ unsafe fn draw_props(
             Prop::Round(is_round) => {
                 let sel = style.round == is_round;
                 let c = if sel { ON } else { OFF };
-                let pen = CreatePen(PS_SOLID, 2, rgb(c.0, c.1, c.2));
-                let old_p = SelectObject(dc, pen as HGDIOBJ);
-                let old_b = SelectObject(dc, GetStockObject(NULL_BRUSH) as HGDIOBJ);
+                // 圆/方选择器也走 GDI+，小圆的边缘最吃抗锯齿
+                let frame = rect(cx - ui(8), cy - ui(8), cx + ui(8), cy + ui(8));
+                let col = rgb(c.0, c.1, c.2);
                 if is_round {
-                    Ellipse(dc, cx - 8, cy - 8, cx + 8, cy + 8);
+                    crate::gdiplus::ellipse(dc, &frame, col, ui(2) as f32);
                 } else {
-                    Rectangle(dc, cx - 8, cy - 8, cx + 8, cy + 8);
+                    crate::gdiplus::rect_stroke(dc, &frame, col, ui(2) as f32);
                 }
-                SelectObject(dc, old_p);
-                SelectObject(dc, old_b);
-                DeleteObject(pen as HGDIOBJ);
                 if sel {
                     round_stroke_w(
                         dc,
-                        &rect(cx - 13, cy - 13, cx + 13, cy + 13),
-                        10,
+                        &rect(cx - ui(13), cy - ui(13), cx + ui(13), cy + ui(13)),
+                        RADIUS_CHIP,
                         rgb(0x2E, 0x2E, 0x36),
-                        2,
+                        ui(2),
                     );
                 }
             }
@@ -1163,7 +1170,7 @@ pub fn start() -> bool {
             back_bmp,
             mask_dc,
             mask_bmp,
-            label_font: ui_font(12),
+            label_font: ui_font(ui(12)),
         }));
 
         let hwnd = CreateWindowExW(

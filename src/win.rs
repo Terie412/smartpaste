@@ -2,7 +2,7 @@
 
 use windows_sys::Win32::Foundation::{HINSTANCE, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, DeleteObject, HFONT, HGDIOBJ, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+    CreateFontW, DeleteObject, HFONT, HGDIOBJ, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS,
     DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, OUT_DEFAULT_PRECIS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -44,7 +44,9 @@ pub fn ui_font(px: i32) -> HFONT {
             DEFAULT_CHARSET as u32,
             OUT_DEFAULT_PRECIS as u32,
             CLIP_DEFAULT_PRECIS as u32,
-            CLEARTYPE_QUALITY as u32,
+            // 用灰度抗锯齿，不用 ClearType：这些字画在深色标签和半透明蒙层上，
+            // 子像素渲染会在白字边上泛出橙蓝色
+            ANTIALIASED_QUALITY as u32,
             (DEFAULT_PITCH | FF_DONTCARE) as u32,
             face.as_ptr(),
         )

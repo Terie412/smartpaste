@@ -89,7 +89,8 @@ src/
 build.rs        编译期调用 rc.exe 打包图标与版本信息
 resources/      app.rc：图标 + VERSIONINFO
 assets/         图标源文件（svg / png / ico）、工具栏雪碧图
-scripts/        生成图标的脚本 + Python 端到端测试与诊断
+scripts/        从 SVG 重新生成图标的脚本（构建资源用）
+temp/          开发期调试脚本与临时产物（git 忽略，不入库）
 ```
 
 ## 设计取舍
@@ -107,18 +108,16 @@ scripts/        生成图标的脚本 + Python 端到端测试与诊断
 - 热键写死为 `Ctrl+Alt+X`，没有设置界面。
 - 没有滚动截图、OCR、贴图混合模式。
 
-## 测试脚本
+## 脚本
 
-`scripts/` 下是开发期用的 Python 工具，需要 Pillow，且默认读取 `target/release/smartpaste.exe`：
+`scripts/` 只有构建资源用的工具，需要 Edge + Pillow：
 
 | 脚本 | 用途 |
 | --- | --- |
-| `e2e_smartpaste.py` / `e2e_gdi.py` / `e2e_gdi2.py` | 端到端冒烟：热键 → 框选 → 复制 → 校验剪贴板 |
-| `hotkey_probe.py` / `hotkey_selftest.py` | 验证热键注册与按键注入方式 |
-| `diag_overlay.py` | 诊断遮罩窗口的可见性、置顶状态、鼠标命中归属 |
-| `mem_probe.py` | 测常驻 / 遮罩打开 / 截图完成三个时点的内存 |
-| `shot_overlay.py` | 用 `--rect` 锁定选区，截一张遮罩完整状态图 |
-| `make_icon.py` / `make_ui_icons.py` | 从 SVG 重新生成 `.ico` 和工具栏雪碧图（需要 Edge + Pillow） |
+| `make_icon.py` | 从 `assets/smartpaste*.svg` 重新生成 `.ico`（9 帧，16→256） |
+| `make_ui_icons.py` | 从 `assets/icons.svg` 重新生成工具栏雪碧图 `icons.png` |
+
+`temp/` 是本地开发目录（**已 git 忽略**），放调试脚本和临时截图，比如端到端冒烟、热键探测、内存采样、遮罩状态截图。这些脚本依赖本机路径、随时会改，所以不纳入版本管理。
 
 程序运行日志写在 `%TEMP%\smartpaste.log`。
 

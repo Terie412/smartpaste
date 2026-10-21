@@ -17,8 +17,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 const SPRITE: &[u8] = include_bytes!("../assets/icons.png");
 /// 源雪碧图里每格的边长
 const CELL: u32 = 96;
-/// 贴到屏幕上的边长
-pub const SIZE: i32 = 20;
+/// 贴到屏幕上的边长（跟随 UI 缩放）
+pub const SIZE: i32 = 32;
 
 /// 每格图标的 [默认色, 选中色]。
 ///
