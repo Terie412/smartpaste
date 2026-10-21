@@ -3,29 +3,32 @@
 
 mod capture;
 mod clipboard;
+mod config;
 mod edit;
 mod gdiplus;
 mod icon;
 mod icons;
 mod overlay;
 mod pin;
+mod settings;
 mod win;
 
 use std::path::PathBuf;
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM, ERROR_ALREADY_EXISTS};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+    RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT,
 };
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, PostQuitMessage, RegisterClassW,
+    DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, MessageBoxW, PostQuitMessage,
+    RegisterClassW,
     SetForegroundWindow, TrackPopupMenu, TranslateMessage, HICON, HWND_MESSAGE, MF_STRING, MSG,
-    SM_CXSMICON, TPM_RIGHTBUTTON, WM_APP, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP,
-    WM_RBUTTONUP, WNDCLASSW,
+    MB_ICONWARNING, MB_OK, SM_CXSMICON, TPM_RIGHTBUTTON, WM_APP, WM_COMMAND, WM_DESTROY,
+    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
 };
 
 use overlay::{CMD_CANCEL, CMD_COPY, CMD_PIN, CMD_SAVE, WM_SNAP_DONE};
@@ -35,6 +38,10 @@ const WM_TRAY: u32 = WM_APP + 1;
 const HOTKEY_ID: i32 = 0xA1;
 const IDM_SNAP: usize = 1001;
 const IDM_EXIT: usize = 1002;
+const IDM_SETTINGS: usize = 1003;
+
+/// 当前真正注册成功的热键，用来在改键失败时回滚
+static mut ACTIVE_HOTKEY: (u32, u32) = (0, 0);
 
 fn main() {
     gdiplus::startup();
@@ -93,6 +100,7 @@ fn main() {
 
     overlay::register();
     pin::register();
+    settings::register();
 
     unsafe {
         let class = to_wide("SmartPasteMain");
@@ -124,12 +132,27 @@ fn main() {
         overlay::set_main_hwnd(hwnd);
         add_tray(hwnd);
 
-        // Ctrl+Alt+X：注册到线程而非窗口。HWND_MESSAGE 窗口收不到 WM_HOTKEY，
+        // 调试/快捷入口：启动就把设置窗口拉出来
+        if std::env::args().any(|a| a == "--settings") {
+            settings::open(hwnd);
+        }
+
+        // 热键注册到线程而非窗口：HWND_MESSAGE 窗口收不到 WM_HOTKEY，
         // 线程级热键会直接进本线程消息队列，循环里截获最稳。
-        let hk = RegisterHotKey(std::ptr::null_mut(), HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x58);
+        let cfg = config::Config::load();
+        let hk = RegisterHotKey(
+            std::ptr::null_mut(),
+            HOTKEY_ID,
+            cfg.hotkey_mod | MOD_NOREPEAT,
+            cfg.hotkey_vk,
+        );
+        if hk != 0 {
+            ACTIVE_HOTKEY = (cfg.hotkey_mod, cfg.hotkey_vk);
+        }
         win::trace(&format!(
-            "started: hwnd={:?} hotkey_registered={}",
+            "started: hwnd={:?} hotkey={} registered={}",
             hwnd,
+            cfg.hotkey_text(),
             hk != 0
         ));
 
@@ -194,7 +217,8 @@ unsafe fn add_tray(hwnd: HWND) {
         "tray: icon={:?} size={}x{} add={}",
         nid.hIcon, metric, metric, added
     ));
-    for (i, c) in "SmartPaste — Ctrl+Alt+X 截图".encode_utf16().enumerate() {
+    let tip = format!("SmartPaste — {} 截图", config::Config::load().hotkey_text());
+    for (i, c) in tip.encode_utf16().enumerate() {
         if i < nid.szTip.len() {
             nid.szTip[i] = c;
         }
@@ -217,7 +241,9 @@ unsafe fn show_menu(hwnd: HWND) {
     if menu.is_null() {
         return;
     }
-    AppendMenuW(menu, MF_STRING, IDM_SNAP, to_wide("截图  Ctrl+Alt+X").as_ptr());
+    let snap_label = to_wide(&format!("截图  {}", config::Config::load().hotkey_text()));
+    AppendMenuW(menu, MF_STRING, IDM_SNAP, snap_label.as_ptr());
+    AppendMenuW(menu, MF_STRING, IDM_SETTINGS, to_wide("设置…").as_ptr());
     AppendMenuW(menu, MF_STRING, IDM_EXIT, to_wide("退出").as_ptr());
 
     let mut pt: POINT = std::mem::zeroed();
@@ -250,10 +276,69 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                     IDM_SNAP => {
                         overlay::start();
                     }
+                    IDM_SETTINGS => {
+                        settings::open(hwnd);
+                    }
                     IDM_EXIT => {
                         DestroyWindow(hwnd);
                     }
                     _ => {}
+                }
+                0
+            }
+            settings::WM_RECORD_START => {
+                UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
+                win::trace("hotkey: 录制中，暂时注销");
+                0
+            }
+            settings::WM_HOTKEY_CHANGED => {
+                let cfg = config::Config::load();
+                let (old_mod, old_vk) = ACTIVE_HOTKEY;
+                UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
+
+                let ok = RegisterHotKey(
+                    std::ptr::null_mut(),
+                    HOTKEY_ID,
+                    cfg.hotkey_mod | MOD_NOREPEAT,
+                    cfg.hotkey_vk,
+                );
+
+                if ok == 0 {
+                    // 目标组合被别的程序占了：把旧热键装回去，配置也回滚，
+                    // 否则程序会变成一个没有任何热键的哑巴
+                    let back = RegisterHotKey(
+                        std::ptr::null_mut(),
+                        HOTKEY_ID,
+                        old_mod | MOD_NOREPEAT,
+                        old_vk,
+                    );
+                    config::Config {
+                        hotkey_mod: old_mod,
+                        hotkey_vk: old_vk,
+                    }
+                    .save();
+                    win::trace(&format!(
+                        "hotkey: {} 注册失败，回滚到 {} (back={})",
+                        cfg.hotkey_text(),
+                        config::Config {
+                            hotkey_mod: old_mod,
+                            hotkey_vk: old_vk
+                        }
+                        .hotkey_text(),
+                        back
+                    ));
+                    MessageBoxW(
+                        hwnd,
+                        to_wide("这个组合键已被其他程序占用，已恢复原来的快捷键。").as_ptr(),
+                        to_wide("smartpaste").as_ptr(),
+                        MB_OK | MB_ICONWARNING,
+                    );
+                } else {
+                    ACTIVE_HOTKEY = (cfg.hotkey_mod, cfg.hotkey_vk);
+                    win::trace(&format!(
+                        "hotkey re-registered: {} ok=1",
+                        cfg.hotkey_text()
+                    ));
                 }
                 0
             }
