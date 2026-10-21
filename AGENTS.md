@@ -110,7 +110,24 @@ max(max(p)-min(p) for p in crop.getdata())              # 看彩边
 
 ---
 
-## 5. 目录约定
+## 5. 文本输入（EDIT 控件）
+
+- 文字的输入框必须用系统 `EDIT` 控件：中文输入法要 IME 组字、候选窗、光标跟随，
+  自己收 `WM_CHAR` 是打不出中文的。
+- **子类化必须用 comctl32 的 `SetWindowSubclass` + `DefSubclassProc`。**
+  用 `SetWindowLongPtrW(GWLP_WNDPROC)` 拿「原过程」再 `CallWindowProcW` 转发，
+  在系统 EDIT 上会稳定失败：`WM_GETTEXTLENGTH` 返回 0，读出来的文字永远是空串。
+  这个坑很隐蔽——控件看起来一切正常，就是读不到字。
+- `EDIT` 内部的换行是**单个 `\r`**。归一化成 `\n` 时不能把 `\r` 当垃圾删掉，
+  否则多行会并成一行。
+- 判断 Shift 有没有按下，用 `GetAsyncKeyState`。`GetKeyState` 依赖本线程队列的
+  处理进度，注入的按键经常读不到（设置面板录热键时已经踩过一次）。
+- 输入法组字期间，按键会以 `VK_PROCESSKEY` 到达，`Enter` 先被输入法拿去上屏，
+  用户要再按一次才提交——这是正常行为，不要试图拦截。
+- Enter / Esc 只投递消息给遮罩窗口，**不要在 EDIT 自己的窗口过程里销毁它**，
+  那等于在自己的栈上拆房子。
+
+## 6. 目录约定
 
 - `scripts/` 只放**生成入库资源**的脚本（图标、雪碧图），需要 Edge + Pillow
 - `temp/` 放调试脚本、临时截图、一次性工具，**已 git 忽略**，不进仓库
@@ -118,7 +135,7 @@ max(max(p)-min(p) for p in crop.getdata())              # 看彩边
 
 ---
 
-## 6. UI 规格速查
+## 7. UI 规格速查
 
 ```rust
 // overlay.rs：1.6 倍（截图时的临时 UI）

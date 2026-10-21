@@ -12,25 +12,42 @@
 use crate::capture::{self, Screen};
 use crate::edit::{self, Doc, Kind, Shape, Style};
 use crate::icons::IconSet;
-use crate::win::{delete_font, hinstance, pt_in, rect, to_wide, ui_font};
+use crate::win::{delete_font, hinstance, pt_in, rect, to_wide, ui_font, ui_font_w};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject,
-    GetTextExtentPoint32W, InvalidateRect, IntersectClipRect, Rectangle, ReleaseDC, RestoreDC,
-    SaveDC, SelectObject, SetBkMode, SetTextColor, TextOutW, AC_SRC_OVER, BLENDFUNCTION,
-    HDC, HFONT, HGDIOBJ, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    GetTextExtentPoint32W, IntersectClipRect, InvalidateRect, Rectangle, ReleaseDC, RestoreDC,
+    SaveDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, TextOutW, UpdateWindow, AC_SRC_OVER,
+    BLENDFUNCTION, HBRUSH, HDC, HFONT, HGDIOBJ, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY,
+    TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_C, VK_CONTROL, VK_ESCAPE, VK_RETURN,
-    VK_S, VK_SHIFT, VK_Z,
+    GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_C, VK_CONTROL,
+    VK_ESCAPE, VK_RETURN, VK_S, VK_SHIFT, VK_Z,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, PostMessageW, RegisterClassW,
-    SetForegroundWindow, ShowWindow, SW_SHOW, WM_APP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, PostMessageW, RegisterClassW, SendMessageW,
+    SetForegroundWindow, SetWindowPos, ShowWindow, EC_LEFTMARGIN, EC_RIGHTMARGIN, EN_CHANGE,
+    ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
+    WM_APP, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_PAINT, WM_RBUTTONUP, WNDCLASSW, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     WS_VISIBLE,
 };
+
+// EDIT 的子类化走 comctl32。
+// 用 SetWindowLongPtr(GWLP_WNDPROC) 拿到的「原过程」在系统控件上不可靠：
+// 转发 WM_GETTEXTLENGTH 会稳定返回 0，读出来的文字永远是空的。
+#[link(name = "comctl32")]
+extern "system" {
+    fn SetWindowSubclass(hwnd: HWND, proc: SUBCLASSPROC, id: usize, data: usize) -> i32;
+    fn RemoveWindowSubclass(hwnd: HWND, proc: SUBCLASSPROC, id: usize) -> i32;
+    fn DefSubclassProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT;
+}
+
+type SUBCLASSPROC =
+    Option<unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM, usize, usize) -> LRESULT>;
 
 pub const CMD_NONE: u32 = 0;
 pub const CMD_COPY: u32 = 1;
@@ -40,6 +57,15 @@ pub const CMD_CANCEL: u32 = 4;
 
 /// 遮罩窗口结束后，把结果发回主窗口
 pub const WM_SNAP_DONE: u32 = WM_APP + 2;
+/// windows-sys 没开 Controls feature，这几个常量本地定义
+const EM_SETMARGINS: u32 = 0x00D3;
+const EM_GETLINECOUNT: u32 = 0x00BA;
+const WM_SETFONT: u32 = 0x0030;
+
+/// 文本输入结束（来自 EDIT 子类）
+const WM_TEXT_COMMIT: u32 = WM_APP + 5;
+/// 取消文本输入
+const WM_TEXT_CANCEL: u32 = WM_APP + 6;
 
 const CLASS_NAME: &str = "SmartPasteOverlay";
 const MASK_ALPHA: u8 = 128;
@@ -83,6 +109,7 @@ pub enum Tool {
     Shape,
     Arrow,
     Pen,
+    Text,
     Eraser,
 }
 
@@ -92,7 +119,8 @@ impl Tool {
             Tool::Shape => 0,
             Tool::Arrow => 1,
             Tool::Pen => 2,
-            Tool::Eraser => 3,
+            Tool::Text => 3,
+            Tool::Eraser => 4,
         }
     }
 
@@ -146,6 +174,20 @@ impl Tool {
             Prop::Width(1),
             Prop::Width(2),
         ];
+        static TEXT: [Prop; 12] = [
+            Prop::Color(0),
+            Prop::Color(1),
+            Prop::Color(2),
+            Prop::Color(3),
+            Prop::Color(4),
+            Prop::Color(5),
+            Prop::Width(0),
+            Prop::Width(1),
+            Prop::Width(2),
+            Prop::Bold,
+            Prop::Stroke,
+            Prop::Shadow,
+        ];
         static ERASER: [Prop; 5] = [
             Prop::Width(0),
             Prop::Width(1),
@@ -159,14 +201,16 @@ impl Tool {
             Tool::Shape => &SHAPE,
             Tool::Arrow => &ARROW,
             Tool::Pen => &PEN,
+            Tool::Text => &TEXT,
             Tool::Eraser => &ERASER,
         }
     }
 
-    /// 笔触档位因工具而异：橡皮明显要粗得多
+    /// 笔触档位因工具而异：橡皮明显要粗得多，文本这一档是字号
     fn width_at(self, i: usize) -> i32 {
         match self {
             Tool::Eraser => [12, 24, 40][i.min(2)],
+            Tool::Text => [18, 26, 34][i.min(2)],
             _ => [2, 4, 7][i.min(2)],
         }
     }
@@ -181,6 +225,12 @@ pub enum Prop {
     Dashed,
     /// true = 圆/椭圆，false = 矩形
     Round(bool),
+    /// 文本加粗
+    Bold,
+    /// 文本描边
+    Stroke,
+    /// 文本投影
+    Shadow,
     /// 纯视觉分隔，不响应点击
     Sep,
 }
@@ -213,8 +263,8 @@ pub struct Overlay {
     pub buttons: Vec<Button>,
     pub props: Vec<(RECT, Prop)>,
     pub tool: Option<Tool>,
-    /// 四个工具各自一套设置，切换工具不会串味
-    pub styles: [Style; 4],
+    /// 每个工具各自一套设置，切换工具不会串味
+    pub styles: [Style; 5],
     /// 光标的屏幕坐标，取色用
     pub cursor: POINT,
     /// 取色显示模式：false = RGB，true = Hex
@@ -222,6 +272,13 @@ pub struct Overlay {
     pub draft: Option<Shape>,
     pub drawing: bool,
     pub doc: Doc,
+    /// 正在输入的 EDIT 子窗口，null 表示没在编辑
+    text_edit: HWND,
+    /// 文字锚点，相对选区左上角
+    text_at: POINT,
+    edit_font: HFONT,
+    edit_bg: HBRUSH,
+    edit_bg_color: u32,
     icons: IconSet,
     back_dc: HDC,
     back_bmp: windows_sys::Win32::Graphics::Gdi::HBITMAP,
@@ -281,6 +338,46 @@ fn color_text(r: u8, g: u8, b: u8, hex: bool) -> String {
     }
 }
 
+/// EDIT 的子类过程：只截 Enter / Esc，其余原样转发。
+///
+/// 不能在这里直接销毁 EDIT——那是它自己的窗口过程，销毁后返回会踩到野指针，
+/// 所以只往遮罩窗口投一条消息，让外层去收尾。
+unsafe extern "system" fn text_edit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if msg == WM_KEYDOWN {
+        let vk = wparam as u32;
+        // 用 GetAsyncKeyState 读物理状态：GetKeyState 依赖本线程队列的处理进度，
+        // 注入的按键经常读不到（设置面板录热键时已经踩过一次）
+        if vk == VK_RETURN as u32 && GetAsyncKeyState(VK_SHIFT as i32) >= 0 {
+            if let Some(ov) = OVERLAY.as_ref() {
+                PostMessageW(ov.hwnd, WM_TEXT_COMMIT, 0, 0);
+            }
+            return 0;
+        }
+        if vk == VK_ESCAPE as u32 {
+            if let Some(ov) = OVERLAY.as_ref() {
+                PostMessageW(ov.hwnd, WM_TEXT_CANCEL, 0, 0);
+            }
+            return 0;
+        }
+    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+/// 颜色是不是浅色。决定输入框底色要不要反着来。
+fn is_light(c: u32) -> bool {
+    let r = (c & 0xFF) as f32;
+    let g = ((c >> 8) & 0xFF) as f32;
+    let b = ((c >> 16) & 0xFF) as f32;
+    0.299 * r + 0.587 * g + 0.114 * b > 150.0
+}
+
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
@@ -318,6 +415,7 @@ impl Overlay {
             (Act::Tool(Tool::Shape), 4usize),
             (Act::Tool(Tool::Arrow), 3),
             (Act::Tool(Tool::Pen), 6),
+            (Act::Tool(Tool::Text), 7),
             (Act::Tool(Tool::Eraser), 8),
             (Act::Copy, 0),
             (Act::Save, 1),
@@ -373,7 +471,8 @@ impl Overlay {
             py = bar_y - PROP_H - GAP;
         }
         for prop in list {
-            self.props.push((rect(px, py, px + PROP_W, py + PROP_H), *prop));
+            self.props
+                .push((rect(px, py, px + PROP_W, py + PROP_H), *prop));
             px += PROP_W;
         }
         crate::win::trace(&format!(
@@ -414,10 +513,12 @@ impl Overlay {
             let Some(sel) = self.selection() else {
                 return;
             };
-            let Some(base) = self
-                .screen
-                .crop_rgba(sel.left, sel.top, sel.right - sel.left, sel.bottom - sel.top)
-            else {
+            let Some(base) = self.screen.crop_rgba(
+                sel.left,
+                sel.top,
+                sel.right - sel.left,
+                sel.bottom - sel.top,
+            ) else {
                 return;
             };
             // 有标注的话，从 back buffer 把合成结果取回来，否则直接用底图
@@ -450,9 +551,166 @@ impl Overlay {
         }
     }
 
+    /// 在点击处拉起一个 EDIT 子窗口输入文字。
+    ///
+    /// 用系统 EDIT 而不是自己收 WM_CHAR：中文输入法需要 IME 组字、候选窗、
+    /// 光标跟随，这套东西只有 EDIT 控件是现成的。
+    unsafe fn start_text(&mut self, x: i32, y: i32) {
+        let Some(sel) = self.selection() else { return };
+        if !pt_in(&sel, x, y) {
+            return;
+        }
+        self.commit_text();
+
+        let st = self.styles[Tool::Text.idx()];
+        let px = st.width.max(10);
+        // 背景跟着字色反着来，否则白字打在白底上什么都看不见
+        let light = is_light(st.color);
+        let bg = if light {
+            rgb(0x1E, 0x1E, 0x24)
+        } else {
+            rgb(0xFF, 0xFF, 0xFF)
+        };
+        self.edit_bg_color = bg;
+        self.edit_font = ui_font_w(px, if st.bold { 700 } else { 400 });
+        self.edit_bg = CreateSolidBrush(bg);
+
+        let lh = (px as f32 * 1.4) as i32;
+        let pad = ui(3);
+        let edit = CreateWindowExW(
+            0,
+            to_wide("EDIT").as_ptr(),
+            std::ptr::null(),
+            WS_CHILD
+                | WS_VISIBLE
+                | (ES_MULTILINE as u32)
+                | (ES_WANTRETURN as u32)
+                | (ES_NOHIDESEL as u32),
+            x - pad,
+            y - ui(2),
+            ui(220),
+            lh + ui(6),
+            self.hwnd,
+            1 as *mut core::ffi::c_void,
+            hinstance(),
+            std::ptr::null_mut(),
+        );
+        if edit.is_null() {
+            crate::win::trace("text: create EDIT failed");
+            self.destroy_edit();
+            return;
+        }
+
+        SendMessageW(edit, WM_SETFONT, self.edit_font as WPARAM, 1);
+        let margins = ((pad as u32) & 0xFFFF) | (((pad as u32) & 0xFFFF) << 16);
+        SendMessageW(
+            edit,
+            EM_SETMARGINS,
+            (EC_LEFTMARGIN | EC_RIGHTMARGIN) as WPARAM,
+            margins as LPARAM,
+        );
+
+        self.text_edit = edit;
+        self.text_at = POINT {
+            x: x - sel.left,
+            y: y - sel.top,
+        };
+        let ok = SetWindowSubclass(edit, Some(text_edit_proc), 1, 0);
+        crate::win::trace(&format!("text: edit={edit:?} subclass={ok}"));
+        SetFocus(edit);
+        crate::win::trace(&format!("text: begin at {x},{y}"));
+    }
+
+    /// 结束输入并把文字落成元素
+    unsafe fn commit_text(&mut self) {
+        if self.text_edit.is_null() {
+            return;
+        }
+        let edit = self.text_edit;
+        let len = GetWindowTextLengthW(edit);
+        let mut buf = vec![0u16; len as usize + 1];
+        GetWindowTextW(edit, buf.as_mut_ptr(), len + 1);
+        let raw = String::from_utf16_lossy(&buf[..len as usize]);
+        self.destroy_edit();
+
+        // EDIT 内部用单个 \r 当换行，GDI+ 只认 \n。
+        // 注意不能把 \r 直接删掉——那正是换行符本身。
+        let text = raw.replace("\r\n", "\n").replace('\r', "\n");
+        let text = text.trim_end_matches('\n').to_string();
+        if !text.trim().is_empty() {
+            self.doc.push(Shape {
+                kind: Kind::Text {
+                    at: self.text_at,
+                    text: text.clone(),
+                },
+                style: self.styles[Tool::Text.idx()],
+            });
+            crate::win::trace(&format!("text: commit {:?}", text));
+        }
+
+        SetFocus(self.hwnd);
+        InvalidateRect(self.hwnd, std::ptr::null(), 0);
+        // 立刻重画一次：复制/保存要从 back buffer 读像素，
+        // 晚一帧就会把刚打的字漏掉
+        UpdateWindow(self.hwnd);
+    }
+
+    /// 放弃这次输入
+    unsafe fn cancel_text(&mut self) {
+        if self.text_edit.is_null() {
+            return;
+        }
+        crate::win::trace("text: cancel");
+        self.destroy_edit();
+        SetFocus(self.hwnd);
+        InvalidateRect(self.hwnd, std::ptr::null(), 0);
+    }
+
+    unsafe fn destroy_edit(&mut self) {
+        if !self.text_edit.is_null() {
+            RemoveWindowSubclass(self.text_edit, Some(text_edit_proc), 1);
+            DestroyWindow(self.text_edit);
+            self.text_edit = std::ptr::null_mut();
+        }
+        if !self.edit_font.is_null() {
+            delete_font(self.edit_font);
+            self.edit_font = std::ptr::null_mut();
+        }
+        if !self.edit_bg.is_null() {
+            DeleteObject(self.edit_bg as HGDIOBJ);
+            self.edit_bg = std::ptr::null_mut();
+        }
+    }
+
+    /// 换行后把输入框撑高，别让字被裁掉
+    unsafe fn fit_text_box(&mut self) {
+        if self.text_edit.is_null() {
+            return;
+        }
+        let lines = SendMessageW(self.text_edit, EM_GETLINECOUNT, 0, 0) as i32;
+        let px = self.styles[Tool::Text.idx()].width.max(10);
+        let lh = (px as f32 * 1.4) as i32;
+        let h = lines.max(1) * lh + ui(6);
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(self.text_edit, &mut r);
+        SetWindowPos(
+            self.text_edit,
+            std::ptr::null_mut(),
+            0,
+            0,
+            r.right - r.left,
+            h,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+
     fn stroke_begin(&mut self, x: i32, y: i32) {
         let Some(sel) = self.selection() else { return };
         let Some(tool) = self.tool else { return };
+        // 文本不是拖出来的，走 EDIT 输入
+        if tool == Tool::Text {
+            return;
+        }
         crate::win::trace(&format!("stroke begin {tool:?} at {x},{y}"));
         let p = POINT {
             x: x - sel.left,
@@ -462,6 +720,7 @@ impl Overlay {
             Tool::Arrow => Kind::Arrow { a: p, b: p },
             Tool::Shape => Kind::Box { a: p, b: p },
             Tool::Pen => Kind::Pen { pts: vec![p] },
+            Tool::Text => return,
             Tool::Eraser => Kind::Eraser { pts: vec![p] },
         };
         self.draft = Some(Shape {
@@ -580,7 +839,13 @@ impl Overlay {
 
             // 6. 预备状态：光标下的像素颜色
             if !self.locked {
-                draw_color_hud(self.back_dc, &self.screen, self.cursor, self.hex_mode, self.label_font);
+                draw_color_hud(
+                    self.back_dc,
+                    &self.screen,
+                    self.cursor,
+                    self.hex_mode,
+                    self.label_font,
+                );
             }
 
             // 7. 上屏
@@ -679,7 +944,13 @@ unsafe fn draw_size_label(hdc: HDC, s: &RECT, font: HFONT) {
 
     SetBkMode(hdc, TRANSPARENT as i32);
     SetTextColor(hdc, rgb(0xFF, 0xFF, 0xFF));
-    TextOutW(hdc, bx + pad_x, by + pad_y, wide.as_ptr(), (wide.len() - 1) as i32);
+    TextOutW(
+        hdc,
+        bx + pad_x,
+        by + pad_y,
+        wide.as_ptr(),
+        (wide.len() - 1) as i32,
+    );
     SelectObject(hdc, old_f);
 }
 
@@ -700,7 +971,7 @@ unsafe fn draw_bar(
     round_fill(dc, &bar, RADIUS_BAR, rgb(0xFF, 0xFF, 0xFF));
 
     // 工具区 / 操作区之间的分隔线
-    let split = 4usize;
+    let split = 5usize;
     if split < buttons.len() {
         let sep_brush = CreateSolidBrush(rgb(0xD0, 0xD0, 0xD6));
         let x = buttons[split].rect.left;
@@ -755,13 +1026,7 @@ unsafe fn draw_bar(
     round_stroke(dc, &bar, RADIUS_BAR, rgb(0xD6, 0xD6, 0xDC));
 }
 
-unsafe fn draw_props(
-    dc: HDC,
-    props: &[(RECT, Prop)],
-    hover_prop: i32,
-    style: &Style,
-    tool: Tool,
-) {
+unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &Style, tool: Tool) {
     use windows_sys::Win32::Graphics::Gdi::{LineTo, MoveToEx};
 
     if props.is_empty() {
@@ -827,15 +1092,30 @@ unsafe fn draw_props(
             }
             Prop::Width(idx) => {
                 let sel = style.width == tool.width_at(idx);
-                // 显示粗细按档位序号放大，跟实际像素脱钩，三档才分得开
-                let shown = ui(2) + idx as i32 * ui(2);
                 let c = if sel { ON } else { OFF };
-                let pen = CreatePen(PS_SOLID, shown, rgb(c.0, c.1, c.2));
-                let old = SelectObject(dc, pen as HGDIOBJ);
-                MoveToEx(dc, cx - ui(7), cy, std::ptr::null_mut());
-                LineTo(dc, cx + ui(7), cy);
-                SelectObject(dc, old);
-                DeleteObject(pen as HGDIOBJ);
+                if tool == Tool::Text {
+                    // 文本：三档字号用大中小三个 A，比画三根线直观
+                    let px = (ui(8) + idx as i32 * ui(3)) as f32;
+                    let spec = crate::gdiplus::FontSpec::new(px, false, "Segoe UI");
+                    let (w, h) = crate::gdiplus::measure_text(dc, &spec, "A");
+                    crate::gdiplus::draw_text(
+                        dc,
+                        &spec,
+                        rgb(c.0, c.1, c.2),
+                        cx - w / 2,
+                        cy - h / 2,
+                        "A",
+                    );
+                } else {
+                    // 显示粗细按档位序号放大，跟实际像素脱钩，三档才分得开
+                    let shown = ui(2) + idx as i32 * ui(2);
+                    let pen = CreatePen(PS_SOLID, shown, rgb(c.0, c.1, c.2));
+                    let old = SelectObject(dc, pen as HGDIOBJ);
+                    MoveToEx(dc, cx - ui(7), cy, std::ptr::null_mut());
+                    LineTo(dc, cx + ui(7), cy);
+                    SelectObject(dc, old);
+                    DeleteObject(pen as HGDIOBJ);
+                }
                 if sel {
                     round_stroke_w(
                         dc,
@@ -870,6 +1150,40 @@ unsafe fn draw_props(
                 }
                 SelectObject(dc, old);
                 DeleteObject(pen as HGDIOBJ);
+            }
+            Prop::Bold => {
+                let c = if style.bold { ON } else { OFF };
+                let spec = crate::gdiplus::FontSpec::new(ui(12) as f32, true, "Segoe UI");
+                let (w, h) = crate::gdiplus::measure_text(dc, &spec, "B");
+                crate::gdiplus::draw_text(
+                    dc,
+                    &spec,
+                    rgb(c.0, c.1, c.2),
+                    cx - w / 2,
+                    cy - h / 2,
+                    "B",
+                );
+            }
+            Prop::Stroke => {
+                let c = if style.stroke { ON } else { OFF };
+                let spec = crate::gdiplus::FontSpec::new(ui(12) as f32, true, "Segoe UI");
+                let (w, h) = crate::gdiplus::measure_text(dc, &spec, "A");
+                crate::gdiplus::text_stroke(
+                    dc,
+                    &spec,
+                    rgb(c.0, c.1, c.2),
+                    cx - w / 2,
+                    cy - h / 2,
+                    "A",
+                    1.5,
+                );
+            }
+            Prop::Shadow => {
+                let c = if style.shadow { ON } else { OFF };
+                let front = rect(cx - ui(5), cy - ui(5), cx + ui(4), cy + ui(4));
+                let back = rect(cx - ui(2), cy - ui(2), cx + ui(7), cy + ui(7));
+                round_fill(dc, &back, 4, rgb(0xC6, 0xC6, 0xCE));
+                round_fill(dc, &front, 4, rgb(c.0, c.1, c.2));
             }
             Prop::Round(is_round) => {
                 let sel = style.round == is_round;
@@ -1026,7 +1340,17 @@ unsafe fn erase_stroke(dc: HDC, screen: &Screen, pts: &[POINT], width: i32, sel:
     for p in pts {
         let x = p.x + sel.left;
         let y = p.y + sel.top;
-        BitBlt(dc, x - r, y - r, r * 2, r * 2, screen.hdc, x - r, y - r, SRCCOPY);
+        BitBlt(
+            dc,
+            x - r,
+            y - r,
+            r * 2,
+            r * 2,
+            screen.hdc,
+            x - r,
+            y - r,
+            SRCCOPY,
+        );
     }
     RestoreDC(dc, saved);
 }
@@ -1077,6 +1401,10 @@ extern "system" fn overlay_wndproc(
             }
             WM_LBUTTONDOWN => {
                 let (x, y) = (lo(lparam), hi(lparam));
+                // 点任何地方都先把正在输入的文字落下来
+                if !ov.text_edit.is_null() {
+                    ov.commit_text();
+                }
                 let idx = ov.hit_button(x, y);
                 let pidx = ov.hit_prop(x, y);
 
@@ -1089,8 +1417,12 @@ extern "system" fn overlay_wndproc(
                 } else if ov.locked && ov.tool.is_some() {
                     if let Some(s) = ov.selection() {
                         if pt_in(&s, x, y) {
-                            ov.stroke_begin(x, y);
-                            SetCapture(hwnd);
+                            if ov.tool == Some(Tool::Text) {
+                                ov.start_text(x, y);
+                            } else {
+                                ov.stroke_begin(x, y);
+                                SetCapture(hwnd);
+                            }
                         }
                     }
                 } else if !ov.locked {
@@ -1138,7 +1470,11 @@ extern "system" fn overlay_wndproc(
                 0
             }
             WM_RBUTTONUP => {
-                ov.finish(CMD_CANCEL);
+                if !ov.text_edit.is_null() {
+                    ov.commit_text();
+                } else {
+                    ov.finish(CMD_CANCEL);
+                }
                 0
             }
             WM_KEYDOWN => {
@@ -1158,7 +1494,8 @@ extern "system" fn overlay_wndproc(
                         return 0;
                     }
                     if vk == VK_C as i32 && !ctrl {
-                        if let Some((r, g, b)) = sample_pixel(&ov.screen, ov.cursor.x, ov.cursor.y) {
+                        if let Some((r, g, b)) = sample_pixel(&ov.screen, ov.cursor.x, ov.cursor.y)
+                        {
                             let text = color_text(r, g, b, ov.hex_mode);
                             match crate::clipboard::copy_text(&text) {
                                 Ok(()) => crate::win::trace(&format!("pick: copied {text}")),
@@ -1195,11 +1532,36 @@ extern "system" fn overlay_wndproc(
                 }
                 0
             }
+            WM_TEXT_COMMIT => {
+                ov.commit_text();
+                0
+            }
+            WM_TEXT_CANCEL => {
+                ov.cancel_text();
+                0
+            }
+            // 输入框的配色：字色跟着当前设置走，底色反着来
+            WM_CTLCOLOREDIT => {
+                let hdc = wparam as HDC;
+                let st = ov.styles[Tool::Text.idx()];
+                SetTextColor(hdc, st.color);
+                SetBkColor(hdc, ov.edit_bg_color);
+                ov.edit_bg as LRESULT
+            }
+            // 换行后把输入框撑高
+            WM_COMMAND => {
+                let code = ((wparam >> 16) & 0xFFFF) as u32;
+                if !ov.text_edit.is_null() && lparam as HWND == ov.text_edit && code == EN_CHANGE {
+                    ov.fit_text_box();
+                }
+                0
+            }
             WM_PAINT => {
                 ov.paint();
                 0
             }
             windows_sys::Win32::UI::WindowsAndMessaging::WM_DESTROY => {
+                ov.destroy_edit();
                 OVERLAY = None;
                 0
             }
@@ -1223,6 +1585,9 @@ fn apply_prop(ov: &mut Overlay, idx: i32) {
         Prop::Filled => st.filled = !st.filled,
         Prop::Dashed => st.dashed = !st.dashed,
         Prop::Round(b) => st.round = b,
+        Prop::Bold => st.bold = !st.bold,
+        Prop::Stroke => st.stroke = !st.stroke,
+        Prop::Shadow => st.shadow = !st.shadow,
         Prop::Sep => {}
     }
 }
@@ -1301,11 +1666,18 @@ pub fn start() -> bool {
                 let mut eraser = base;
                 eraser.width = 24;
                 eraser.round = true;
-                [base, arrow, base, eraser]
+                let mut text = base;
+                text.width = 26;
+                [base, arrow, base, text, eraser]
             },
             draft: None,
             drawing: false,
             doc: Doc::default(),
+            text_edit: std::ptr::null_mut(),
+            text_at: POINT { x: 0, y: 0 },
+            edit_font: std::ptr::null_mut(),
+            edit_bg: std::ptr::null_mut(),
+            edit_bg_color: rgb(0xFF, 0xFF, 0xFF),
             icons: crate::icons::load(),
             back_dc,
             back_bmp,

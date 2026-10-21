@@ -128,6 +128,16 @@ extern "system" {
         format: *mut core::ffi::c_void,
         brush: *mut core::ffi::c_void,
     ) -> i32;
+    fn GdipAddPathString(
+        path: *mut core::ffi::c_void,
+        s: *const u16,
+        len: i32,
+        family: *mut core::ffi::c_void,
+        style: i32,
+        em: f32,
+        layout: *const RectF,
+        format: *mut core::ffi::c_void,
+    ) -> i32;
     fn GdipMeasureString(
         g: *mut core::ffi::c_void,
         s: *const u16,
@@ -428,6 +438,11 @@ pub unsafe fn measure_text(dc: HDC, spec: &FontSpec, s: &str) -> (i32, i32) {
 
 /// 在 (x, y) 画一行字，y 是行框顶部。
 pub unsafe fn draw_text(dc: HDC, spec: &FontSpec, colorref: u32, x: i32, y: i32, s: &str) {
+    draw_text_argb(dc, spec, argb(colorref), x, y, s);
+}
+
+/// 同 `draw_text`，但颜色是 ARGB，可以带透明度。阴影用。
+pub unsafe fn draw_text_argb(dc: HDC, spec: &FontSpec, color: u32, x: i32, y: i32, s: &str) {
     let mut g: *mut core::ffi::c_void = core::ptr::null_mut();
     if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
         return;
@@ -439,7 +454,7 @@ pub unsafe fn draw_text(dc: HDC, spec: &FontSpec, colorref: u32, x: i32, y: i32,
         return;
     };
     let mut brush: *mut core::ffi::c_void = core::ptr::null_mut();
-    if GdipCreateSolidFill(argb(colorref), &mut brush) != 0 {
+    if GdipCreateSolidFill(color, &mut brush) != 0 {
         GdipDeleteGraphics(g);
         return;
     }
@@ -460,5 +475,60 @@ pub unsafe fn draw_text(dc: HDC, spec: &FontSpec, colorref: u32, x: i32, y: i32,
         brush,
     );
     GdipDeleteBrush(brush);
+    GdipDeleteGraphics(g);
+}
+
+/// 只描边不填充：把文字转成路径再用画笔勾一遍。
+/// 截图底色不可控，白字压在浅色区域上时，靠这圈描边把字托出来。
+pub unsafe fn text_stroke(
+    dc: HDC,
+    spec: &FontSpec,
+    colorref: u32,
+    x: i32,
+    y: i32,
+    s: &str,
+    width: f32,
+) {
+    let mut g: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
+        return;
+    }
+    GdipSetSmoothingMode(g, SMOOTH_AA);
+
+    let Some(ctx) = text_ctx(spec) else {
+        GdipDeleteGraphics(g);
+        return;
+    };
+    let mut path: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreatePath(FILL_WINDING, &mut path) != 0 || path.is_null() {
+        GdipDeleteGraphics(g);
+        return;
+    }
+
+    let wide: Vec<u16> = s.encode_utf16().collect();
+    let layout = RectF {
+        x: x as f32,
+        y: y as f32,
+        w: 4000.0,
+        h: 400.0,
+    };
+    let style = if spec.bold { FONT_STYLE_BOLD } else { 0 };
+    GdipAddPathString(
+        path,
+        wide.as_ptr(),
+        wide.len() as i32,
+        ctx.family,
+        style,
+        spec.px,
+        &layout,
+        ctx.format,
+    );
+
+    let mut pen: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreatePen1(argb(colorref), width, UNIT_PIXEL, &mut pen) == 0 {
+        GdipDrawPath(g, pen, path);
+        GdipDeletePen(pen);
+    }
+    GdipDeletePath(path);
     GdipDeleteGraphics(g);
 }

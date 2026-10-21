@@ -3,12 +3,11 @@
 //! 坐标一律相对选区左上角，绘制的时侯再加屏幕偏移 (ox, oy)。
 //! 这样选区移动或者窗口尺寸变化都不影响已画好的元素。
 
-use crate::win::ui_font;
+use crate::gdiplus::FontSpec;
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::Graphics::Gdi::{
     CreatePen, CreateSolidBrush, DeleteObject, Ellipse, GetStockObject, LineTo, MoveToEx, Polygon,
-    Polyline, Rectangle, SelectObject, SetBkMode, SetTextColor, TextOutW, HDC, HGDIOBJ, NULL_BRUSH,
-    NULL_PEN, PS_SOLID, TRANSPARENT,
+    Polyline, Rectangle, SelectObject, HDC, HGDIOBJ, NULL_BRUSH, NULL_PEN, PS_SOLID,
 };
 
 /// 描边样式。颜色是 COLORREF（0x00BBGGRR）。
@@ -25,6 +24,12 @@ pub struct Style {
     /// 形状工具：true = 圆/椭圆，false = 矩形
     /// 橡皮工具：true = 圆笔刷，false = 方笔刷
     pub round: bool,
+    /// 文本：加粗
+    pub bold: bool,
+    /// 文本：描边（自动取对比色）
+    pub stroke: bool,
+    /// 文本：投影
+    pub shadow: bool,
     pub font_size: i32,
 }
 
@@ -38,6 +43,9 @@ impl Default for Style {
             head: true,
             tail: false,
             round: false,
+            bold: false,
+            stroke: false,
+            shadow: false,
             font_size: 22,
         }
     }
@@ -45,13 +53,26 @@ impl Default for Style {
 
 #[derive(Clone)]
 pub enum Kind {
-    Arrow { a: POINT, b: POINT },
+    Arrow {
+        a: POINT,
+        b: POINT,
+    },
     /// 矩形或椭圆，看 style.round
-    Box { a: POINT, b: POINT },
-    Pen { pts: Vec<POINT> },
+    Box {
+        a: POINT,
+        b: POINT,
+    },
+    Pen {
+        pts: Vec<POINT>,
+    },
     /// 橡皮：重绘时把底图这一块盖回来，不走常规描边
-    Eraser { pts: Vec<POINT> },
-    Text { at: POINT, text: String },
+    Eraser {
+        pts: Vec<POINT>,
+    },
+    Text {
+        at: POINT,
+        text: String,
+    },
 }
 
 #[derive(Clone)]
@@ -138,7 +159,12 @@ unsafe fn stroke(dc: HDC, st: &Style, x0: i32, y0: i32, x1: i32, y1: i32) {
             let mut pos = 0.0f32;
             while pos < len {
                 let end = (pos + dash).min(len);
-                MoveToEx(dc, x0 + (ux * pos) as i32, y0 + (uy * pos) as i32, std::ptr::null_mut());
+                MoveToEx(
+                    dc,
+                    x0 + (ux * pos) as i32,
+                    y0 + (uy * pos) as i32,
+                    std::ptr::null_mut(),
+                );
                 LineTo(dc, x0 + (ux * end) as i32, y0 + (uy * end) as i32);
                 pos = end + gap;
             }
@@ -250,24 +276,43 @@ unsafe fn pen_stroke(dc: HDC, st: &Style, pts: &[POINT], ox: i32, oy: i32) {
     DeleteObject(pen as HGDIOBJ);
 }
 
+/// 文本：先投影，再描边，最后填字。
+///
+/// 三层顺序不能反——描边是沿字形轮廓勾的，压在里面会被填充盖掉一半。
 unsafe fn label(dc: HDC, st: &Style, at: POINT, text: &str, ox: i32, oy: i32) {
     if text.is_empty() {
         return;
     }
-    let font = ui_font(st.font_size.max(8));
-    let old_f = SelectObject(dc, font as HGDIOBJ);
-    let wide: Vec<u16> = text.encode_utf16().collect();
+    let px = st.font_size.max(8);
+    let spec = FontSpec::new(px as f32, st.bold, "Microsoft YaHei");
+    let (x, y) = (at.x + ox, at.y + oy);
 
-    SetBkMode(dc, TRANSPARENT as i32);
-    SetTextColor(dc, st.color);
-    TextOutW(
-        dc,
-        at.x + ox,
-        at.y + oy,
-        wide.as_ptr(),
-        wide.len() as i32,
-    );
+    if st.shadow {
+        // 偏移一点点，带透明度，像压在纸上的影子
+        crate::gdiplus::draw_text_argb(dc, &spec, 0x6600_0000, x + 2, y + 2, text);
+    }
+    if st.stroke {
+        crate::gdiplus::text_stroke(
+            dc,
+            &spec,
+            contrast_color(st.color),
+            x,
+            y,
+            text,
+            (px as f32 / 9.0).max(2.0),
+        );
+    }
+    crate::gdiplus::draw_text(dc, &spec, st.color, x, y, text);
+}
 
-    SelectObject(dc, old_f);
-    DeleteObject(font as HGDIOBJ);
+/// 描边取反差色：深字配白边，浅字配黑边
+fn contrast_color(c: u32) -> u32 {
+    let r = (c & 0xFF) as f32;
+    let g = ((c >> 8) & 0xFF) as f32;
+    let b = ((c >> 16) & 0xFF) as f32;
+    if 0.299 * r + 0.587 * g + 0.114 * b > 150.0 {
+        0x0000_0000
+    } else {
+        0x00FF_FFFF
+    }
 }
