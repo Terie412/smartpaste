@@ -22,11 +22,11 @@ use windows_sys::Win32::Graphics::Gdi::{
     HDC, HFONT, HGDIOBJ, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_ESCAPE, VK_RETURN, VK_S,
-    VK_Z,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_C, VK_CONTROL, VK_ESCAPE, VK_RETURN,
+    VK_S, VK_SHIFT, VK_Z,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, PostMessageW, RegisterClassW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, PostMessageW, RegisterClassW,
     SetForegroundWindow, ShowWindow, SW_SHOW, WM_APP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     WS_VISIBLE,
@@ -215,6 +215,10 @@ pub struct Overlay {
     pub tool: Option<Tool>,
     /// 四个工具各自一套设置，切换工具不会串味
     pub styles: [Style; 4],
+    /// 光标的屏幕坐标，取色用
+    pub cursor: POINT,
+    /// 取色显示模式：false = RGB，true = Hex
+    pub hex_mode: bool,
     pub draft: Option<Shape>,
     pub drawing: bool,
     pub doc: Doc,
@@ -248,6 +252,32 @@ pub fn set_preset(x: i32, y: i32, w: i32, h: i32) {
 pub fn set_main_hwnd(h: HWND) {
     unsafe {
         MAIN_HWND = h;
+    }
+}
+
+/// 取屏幕坐标下的像素。坐标落在外就返回 None。
+///
+/// DIB 里的 u32 是 0x00RRGGBB（小端存成 B,G,R,0），和高位取色的顺序一致。
+fn sample_pixel(screen: &Screen, x: i32, y: i32) -> Option<(u8, u8, u8)> {
+    let lx = x - screen.x;
+    let ly = y - screen.y;
+    if lx < 0 || ly < 0 || lx >= screen.width || ly >= screen.height {
+        return None;
+    }
+    let idx = (ly * screen.width + lx) as usize;
+    let px = unsafe { *screen.bits.add(idx) };
+    Some((
+        ((px >> 16) & 0xFF) as u8,
+        ((px >> 8) & 0xFF) as u8,
+        (px & 0xFF) as u8,
+    ))
+}
+
+fn color_text(r: u8, g: u8, b: u8, hex: bool) -> String {
+    if hex {
+        format!("#{r:02X}{g:02X}{b:02X}")
+    } else {
+        format!("{r}, {g}, {b}")
     }
 }
 
@@ -548,7 +578,12 @@ impl Overlay {
                 }
             }
 
-            // 6. 上屏
+            // 6. 预备状态：光标下的像素颜色
+            if !self.locked {
+                draw_color_hud(self.back_dc, &self.screen, self.cursor, self.hex_mode, self.label_font);
+            }
+
+            // 7. 上屏
             BitBlt(hdc, 0, 0, w, h, self.back_dc, 0, 0, SRCCOPY);
             EndPaint(self.hwnd, &ps);
         }
@@ -864,6 +899,69 @@ unsafe fn draw_props(
     round_stroke(dc, &bar, RADIUS_BAR, rgb(0xD6, 0xD6, 0xDC));
 }
 
+/// 预备截图的取色浮层：色块 + 光标下像素的颜色值。
+///
+/// 跟着光标走，右下偏移；贴到屏幕边就翻到另一侧，始终完整可见。
+unsafe fn draw_color_hud(dc: HDC, screen: &Screen, cursor: POINT, hex: bool, font: HFONT) {
+    let Some((r, g, b)) = sample_pixel(screen, cursor.x, cursor.y) else {
+        return;
+    };
+    let text = color_text(r, g, b, hex);
+    let wide = to_wide(&text);
+
+    let old_f = SelectObject(dc, font as HGDIOBJ);
+    let mut size: windows_sys::Win32::Foundation::SIZE = std::mem::zeroed();
+    GetTextExtentPoint32W(dc, wide.as_ptr(), (wide.len() - 1) as i32, &mut size);
+    SelectObject(dc, old_f);
+
+    let sw = ui(22);
+    let pad = ui(8);
+    let gap = ui(8);
+    let bw = pad * 2 + sw + gap + size.cx;
+    let bh = size.cy.max(sw) + pad * 2;
+
+    let off = ui(18);
+    let right = screen.x + screen.width;
+    let bottom = screen.y + screen.height;
+
+    let mut bx = cursor.x + off;
+    let mut by = cursor.y + off;
+    if bx + bw > right {
+        bx = cursor.x - off - bw;
+    }
+    if by + bh > bottom {
+        by = cursor.y - off - bh;
+    }
+    bx = bx.max(screen.x);
+    by = by.max(screen.y);
+
+    let bg = rect(bx, by, bx + bw, by + bh);
+    round_fill(dc, &bg, RADIUS_CHIP, rgb(0x0A, 0x0A, 0x0C));
+    round_stroke(dc, &bg, RADIUS_CHIP, rgb(0x4A, 0x4A, 0x52));
+
+    // 色块就是采样到的颜色本身
+    let chip = rect(
+        bx + pad,
+        by + (bh - sw) / 2,
+        bx + pad + sw,
+        by + (bh + sw) / 2,
+    );
+    round_fill(dc, &chip, ui(4), rgb(r, g, b));
+    round_stroke(dc, &chip, ui(4), rgb(0x6A, 0x6A, 0x72));
+
+    SetBkMode(dc, TRANSPARENT as i32);
+    SetTextColor(dc, rgb(0xFF, 0xFF, 0xFF));
+    let old_f = SelectObject(dc, font as HGDIOBJ);
+    TextOutW(
+        dc,
+        bx + pad + sw + gap,
+        by + (bh - size.cy) / 2,
+        wide.as_ptr(),
+        (wide.len() - 1) as i32,
+    );
+    SelectObject(dc, old_f);
+}
+
 /// 从 back buffer 里取回选区像素 —— 保存/复制要带上标注
 unsafe fn read_back_buffer(dc: HDC, sel: RECT) -> Option<image::RgbaImage> {
     use windows_sys::Win32::Graphics::Gdi::{
@@ -949,6 +1047,17 @@ extern "system" fn overlay_wndproc(
         match msg {
             WM_MOUSEMOVE => {
                 let (x, y) = (lo(lparam), hi(lparam));
+
+                // 取色浮层跟着光标走，只有还没框选时才需要
+                if !ov.locked {
+                    let sx = x + ov.screen.x;
+                    let sy = y + ov.screen.y;
+                    if ov.cursor.x != sx || ov.cursor.y != sy {
+                        ov.cursor = POINT { x: sx, y: sy };
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                }
+
                 if ov.drawing {
                     ov.stroke_update(x, y);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
@@ -1035,6 +1144,32 @@ extern "system" fn overlay_wndproc(
             WM_KEYDOWN => {
                 let vk = wparam as u16 as i32;
                 let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
+
+                // 预备状态下的取色快捷键
+                if !ov.locked && ov.tool.is_none() {
+                    if vk == VK_SHIFT as i32 {
+                        // 按住 Shift 会连续发 WM_KEYDOWN，lparam 的 bit30 标记重复，
+                        // 不过滤的话模式会疯狂来回切
+                        if (lparam as usize >> 30) & 1 == 0 {
+                            ov.hex_mode = !ov.hex_mode;
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                            crate::win::trace(&format!("pick: hex={}", ov.hex_mode));
+                        }
+                        return 0;
+                    }
+                    if vk == VK_C as i32 && !ctrl {
+                        if let Some((r, g, b)) = sample_pixel(&ov.screen, ov.cursor.x, ov.cursor.y) {
+                            let text = color_text(r, g, b, ov.hex_mode);
+                            match crate::clipboard::copy_text(&text) {
+                                Ok(()) => crate::win::trace(&format!("pick: copied {text}")),
+                                Err(e) => crate::win::trace(&format!("pick: copy failed {e}")),
+                            }
+                        }
+                        ov.finish(CMD_CANCEL);
+                        return 0;
+                    }
+                }
+
                 if vk == VK_ESCAPE as i32 {
                     // 有工具时先退工具，再按一次才关掉整个遮罩
                     if ov.tool.is_some() {
@@ -1153,6 +1288,12 @@ pub fn start() -> bool {
             buttons: Vec::new(),
             props: Vec::new(),
             tool: None,
+            cursor: {
+                let mut pt: POINT = std::mem::zeroed();
+                GetCursorPos(&mut pt);
+                pt
+            },
+            hex_mode: false,
             styles: {
                 let base = Style::default();
                 let mut arrow = base;

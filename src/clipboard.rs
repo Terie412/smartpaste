@@ -68,6 +68,43 @@ pub fn copy_image(img: &image::RgbaImage) -> Result<(), String> {
     }
 }
 
+/// 把纯文本写进剪贴板（CF_UNICODETEXT）。取色功能用。
+pub fn copy_text(s: &str) -> Result<(), String> {
+    const CF_UNICODETEXT: u32 = 13;
+
+    unsafe {
+        let mut opened = false;
+        for _ in 0..4 {
+            if OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        if !opened {
+            return Err("OpenClipboard failed".into());
+        }
+        EmptyClipboard();
+
+        // 结尾必须带一个 0 终止符
+        let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+        let bytes =
+            std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * std::mem::size_of::<u16>());
+
+        let ok = match alloc_global(bytes) {
+            Some(h) => !SetClipboardData(CF_UNICODETEXT, h).is_null(),
+            None => false,
+        };
+        CloseClipboard();
+
+        if ok {
+            Ok(())
+        } else {
+            Err("写入文本剪贴板失败".into())
+        }
+    }
+}
+
 unsafe fn alloc_global(data: &[u8]) -> Option<windows_sys::Win32::Foundation::HANDLE> {
     let h = GlobalAlloc(GMEM_MOVEABLE, data.len());
     if h.is_null() {
