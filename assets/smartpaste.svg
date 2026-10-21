@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="512" height="512" rx="112" ry="112"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <!-- 主色：玫红满铺 -->
+    <rect width="512" height="512" fill="#FF2E63"/>
+    <!-- 左上角：黄 -->
+    <polygon points="0,0 300,0 0,300" fill="#FFC300"/>
+    <!-- 右下角：青 -->
+    <polygon points="512,208 512,512 208,512" fill="#00C8FF"/>
+  </g>
+
+  <g fill="#FFFFFF" transform="translate(0,-30)">
+    <!-- 掌垫：倒心形 -->
+    <path d="M149 341
+             C149 306 173 274 205 274
+             C226 274 242 282 256 282
+             C270 282 286 274 307 274
+             C339 274 363 306 363 341
+             C363 391 314 428 256 428
+             C198 428 149 391 149 341 Z"/>
+    <!-- 四趾 -->
+    <ellipse cx="142" cy="224" rx="34" ry="41" transform="rotate(-32 142 224)"/>
+    <ellipse cx="216" cy="186" rx="35" ry="42" transform="rotate(-12 216 186)"/>
+    <ellipse cx="296" cy="186" rx="35" ry="42" transform="rotate(12 296 186)"/>
+    <ellipse cx="370" cy="224" rx="34" ry="41" transform="rotate(32 370 224)"/>
+  </g>
+</svg>

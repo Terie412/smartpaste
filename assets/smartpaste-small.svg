@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="512" height="512" rx="96" ry="96"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect width="512" height="512" fill="#FF2E63"/>
+    <polygon points="0,0 300,0 0,300" fill="#FFC300"/>
+    <polygon points="512,208 512,512 208,512" fill="#00C8FF"/>
+  </g>
+
+  <!-- 小尺寸简化版：趾垫更小、间隙更大，保证 16px 下仍可分辨 -->
+  <g fill="#FFFFFF" transform="translate(0,-12)">
+    <path d="M161 343
+             C161 310 184 280 214 280
+             C232 280 246 288 256 288
+             C266 288 280 280 298 280
+             C328 280 351 310 351 343
+             C351 390 306 424 256 424
+             C206 424 161 390 161 343 Z"/>
+    <ellipse cx="118" cy="236" rx="28" ry="34" transform="rotate(-34 118 236)"/>
+    <ellipse cx="206" cy="198" rx="28" ry="34" transform="rotate(-12 206 198)"/>
+    <ellipse cx="306" cy="198" rx="28" ry="34" transform="rotate(12 306 198)"/>
+    <ellipse cx="394" cy="236" rx="28" ry="34" transform="rotate(34 394 236)"/>
+  </g>
+</svg>

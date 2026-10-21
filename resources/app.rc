@@ -1,0 +1,33 @@
+// smartpaste 的 Windows 资源脚本。
+// 全 ASCII，避免 rc.exe 的代码页问题。
+
+1 ICON "assets/smartpaste.ico"
+
+1 VERSIONINFO
+FILEVERSION 0,3,0,0
+PRODUCTVERSION 0,3,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "smartpaste"
+            VALUE "FileDescription", "smartpaste - screenshot and pin tool"
+            VALUE "FileVersion", "0.3.0"
+            VALUE "InternalName", "smartpaste"
+            VALUE "LegalCopyright", "MIT"
+            VALUE "OriginalFilename", "smartpaste.exe"
+            VALUE "ProductName", "smartpaste"
+            VALUE "ProductVersion", "0.3.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

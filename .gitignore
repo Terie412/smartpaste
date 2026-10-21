@@ -1,0 +1,27 @@
+# ---- Rust ----
+/target/
+**/*.rs.bk
+*.pdb
+*.exp
+*.lib
+
+# ---- 本地调试产物 ----
+# scripts/shot_overlay.py 等手工截的遮罩截图，不进仓库
+assets/_*.png
+/probe/
+*.log
+
+# ---- Python（scripts/ 里只有标准库 + Pillow，挡一下缓存就行）----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
