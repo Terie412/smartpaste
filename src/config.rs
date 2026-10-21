@@ -93,8 +93,9 @@ impl Config {
     }
 }
 
-/// 把修饰位 + 主键拼成 "Ctrl + Shift + A" 这种可读形式
-pub fn hotkey_text(mods: u32, vk: u32) -> String {
+/// 把修饰位 + 主键拆成 ["Ctrl", "Shift", "A"]。
+/// 界面上每个部件都要画成独立的键帽，所以这里不拼字符串。
+pub fn hotkey_parts(mods: u32, vk: u32) -> Vec<String> {
     let mut parts = Vec::new();
     if mods & MOD_CONTROL != 0 {
         parts.push("Ctrl".to_string());
@@ -109,7 +110,12 @@ pub fn hotkey_text(mods: u32, vk: u32) -> String {
         parts.push("Win".to_string());
     }
     parts.push(key_name(vk));
-    parts.join(" + ")
+    parts
+}
+
+/// 拼成 "Ctrl + Shift + A" 这种可读形式
+pub fn hotkey_text(mods: u32, vk: u32) -> String {
+    hotkey_parts(mods, vk).join(" + ")
 }
 
 fn key_name(vk: u32) -> String {

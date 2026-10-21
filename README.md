@@ -81,7 +81,7 @@ src/
   overlay.rs    全屏遮罩：框选、工具条、属性条、绘制流水线
   edit.rs       标注元素的数据结构、GDI 绘制、撤销栈
   config.rs     配置读写（%APPDATA%\smartpaste\config.txt）
-  settings.rs   设置窗口：自绘面板 + 热键录制
+  settings.rs   设置窗口：卡片式面板、键帽展示、热键录制
   gdiplus.rs    GDI+ 的最小封装，只为抗锯齿的圆角与线条
   capture.rs    抓屏，直接持有 DIB Section（既是 HBITMAP 又能读像素）
   clipboard.rs  剪贴板，CF_DIB + PNG 双格式

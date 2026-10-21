@@ -28,16 +28,27 @@ pub fn pt_in(r: &RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
-/// 创建 UI 字体（微软雅黑）。调用方负责 DeleteObject。
+/// 创建 UI 字体（微软雅黑，常规字重）。调用方负责 DeleteObject。
 pub fn ui_font(px: i32) -> HFONT {
+    ui_font_w(px, FW_NORMAL as i32)
+}
+
+/// 创建 UI 字体，可指定字重。调用方负责 DeleteObject。
+pub fn ui_font_w(px: i32, weight: i32) -> HFONT {
+    ui_font_ex(px, weight, "Microsoft YaHei")
+}
+
+/// 指定字号、字重、字体族。拉丁字母用 Segoe UI 比雅黑更挺，
+/// 中文交给系统的字体链接回退。
+pub fn ui_font_ex(px: i32, weight: i32, face: &str) -> HFONT {
     unsafe {
-        let face = to_wide("Microsoft YaHei");
+        let face = to_wide(face);
         CreateFontW(
             -px,
             0,
             0,
             0,
-            FW_NORMAL as i32,
+            weight,
             0,
             0,
             0,
