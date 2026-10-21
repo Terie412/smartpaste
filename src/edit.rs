@@ -30,7 +30,6 @@ pub struct Style {
     pub stroke: bool,
     /// 文本：投影
     pub shadow: bool,
-    pub font_size: i32,
 }
 
 impl Default for Style {
@@ -46,7 +45,6 @@ impl Default for Style {
             bold: false,
             stroke: false,
             shadow: false,
-            font_size: 22,
         }
     }
 }
@@ -283,7 +281,8 @@ unsafe fn label(dc: HDC, st: &Style, at: POINT, text: &str, ox: i32, oy: i32) {
     if text.is_empty() {
         return;
     }
-    let px = st.font_size.max(8);
+    // 文本工具把字号存在 width 里（属性条的 Width 档位就是字号）
+    let px = st.width.max(8);
     let spec = FontSpec::new(px as f32, st.bold, "Microsoft YaHei");
     let (x, y) = (at.x + ox, at.y + oy);
 
