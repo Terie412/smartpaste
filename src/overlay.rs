@@ -843,8 +843,8 @@ unsafe fn draw_props(
                 if sel {
                     round_stroke_w(
                         dc,
-                        &rect(cx - 12, cy - 12, cx + 12, cy + 12),
-                        8,
+                        &rect(cx - 13, cy - 13, cx + 13, cy + 13),
+                        10,
                         rgb(0x2E, 0x2E, 0x36),
                         2,
                     );
