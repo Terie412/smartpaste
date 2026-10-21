@@ -11,6 +11,15 @@ use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::Graphics::Gdi::HDC;
 
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RectF {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+#[repr(C)]
 struct StartupInput {
     version: u32,
     callback: *const core::ffi::c_void,
@@ -32,12 +41,7 @@ extern "system" {
 
     fn GdipCreateSolidFill(color: u32, brush: *mut *mut core::ffi::c_void) -> i32;
     fn GdipDeleteBrush(b: *mut core::ffi::c_void) -> i32;
-    fn GdipCreatePen1(
-        color: u32,
-        width: f32,
-        unit: i32,
-        pen: *mut *mut core::ffi::c_void,
-    ) -> i32;
+    fn GdipCreatePen1(color: u32, width: f32, unit: i32, pen: *mut *mut core::ffi::c_void) -> i32;
     fn GdipDeletePen(p: *mut core::ffi::c_void) -> i32;
 
     fn GdipCreatePath(mode: i32, path: *mut *mut core::ffi::c_void) -> i32;
@@ -51,18 +55,18 @@ extern "system" {
         start: f32,
         sweep: f32,
     ) -> i32;
-    fn GdipAddPathLine(
-        path: *mut core::ffi::c_void,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
-    ) -> i32;
+    fn GdipAddPathLine(path: *mut core::ffi::c_void, x1: f32, y1: f32, x2: f32, y2: f32) -> i32;
     fn GdipClosePathFigure(path: *mut core::ffi::c_void) -> i32;
-    fn GdipFillPath(g: *mut core::ffi::c_void, brush: *mut core::ffi::c_void, path: *mut core::ffi::c_void)
-        -> i32;
-    fn GdipDrawPath(g: *mut core::ffi::c_void, pen: *mut core::ffi::c_void, path: *mut core::ffi::c_void)
-        -> i32;
+    fn GdipFillPath(
+        g: *mut core::ffi::c_void,
+        brush: *mut core::ffi::c_void,
+        path: *mut core::ffi::c_void,
+    ) -> i32;
+    fn GdipDrawPath(
+        g: *mut core::ffi::c_void,
+        pen: *mut core::ffi::c_void,
+        path: *mut core::ffi::c_void,
+    ) -> i32;
 
     fn GdipDrawLine(
         g: *mut core::ffi::c_void,
@@ -95,6 +99,45 @@ extern "system" {
         y: f32,
         w: f32,
         h: f32,
+    ) -> i32;
+
+    fn GdipCreateFontFamilyFromName(
+        name: *const u16,
+        collection: *mut core::ffi::c_void,
+        family: *mut *mut core::ffi::c_void,
+    ) -> i32;
+    fn GdipDeleteFontFamily(family: *mut core::ffi::c_void) -> i32;
+    fn GdipCreateFont(
+        family: *mut core::ffi::c_void,
+        em: f32,
+        style: i32,
+        unit: i32,
+        font: *mut *mut core::ffi::c_void,
+    ) -> i32;
+    fn GdipDeleteFont(font: *mut core::ffi::c_void) -> i32;
+    fn GdipCreateStringFormat(attrs: i32, lang: u16, format: *mut *mut core::ffi::c_void) -> i32;
+    fn GdipDeleteStringFormat(format: *mut core::ffi::c_void) -> i32;
+    fn GdipSetStringFormatFlags(format: *mut core::ffi::c_void, flags: i32) -> i32;
+    fn GdipSetTextRenderingHint(g: *mut core::ffi::c_void, hint: i32) -> i32;
+    fn GdipDrawString(
+        g: *mut core::ffi::c_void,
+        s: *const u16,
+        len: i32,
+        font: *mut core::ffi::c_void,
+        layout: *const RectF,
+        format: *mut core::ffi::c_void,
+        brush: *mut core::ffi::c_void,
+    ) -> i32;
+    fn GdipMeasureString(
+        g: *mut core::ffi::c_void,
+        s: *const u16,
+        len: i32,
+        font: *mut core::ffi::c_void,
+        layout: *const RectF,
+        format: *mut core::ffi::c_void,
+        bounds: *mut RectF,
+        fitted: *mut i32,
+        lines: *mut i32,
     ) -> i32;
 }
 
@@ -273,4 +316,149 @@ pub unsafe fn rect_fill(dc: HDC, r: &RECT, colorref: u32) {
         );
     });
     GdipDeleteBrush(brush);
+}
+
+// ---- 文字 ----
+//
+// 为什么不直接用 GDI 的 TextOutW：GDI 会对字形做网格拟合（hinting），
+// 把笔画吸附到像素栅格上，CJK 的斜笔在 20~30px 就会出硬阶梯；
+// 而且 GDI 的 ANTIALIASED_QUALITY 在系统开启 ClearType 时并不一定
+// 真的退回灰度——向 32bpp DIB 绘制时实测与 ClearType 逐像素相同。
+// GDI+ 的 TextRenderingHintAntiAlias 是纯灰度、不拟合，字形轮廓更接近原始设计。
+
+/// 一段文字的画法。px 按物理像素算，与 GDI 的 -lfHeight 基本等价。
+#[derive(Clone, Copy)]
+pub struct FontSpec {
+    pub px: f32,
+    pub bold: bool,
+    pub face: &'static str,
+}
+
+impl FontSpec {
+    pub const fn new(px: f32, bold: bool, face: &'static str) -> Self {
+        Self { px, bold, face }
+    }
+}
+
+const TEXT_ANTIALIAS: i32 = 3; // TextRenderingHintAntiAliasGridFit
+const FONT_STYLE_BOLD: i32 = 1;
+const SF_NO_WRAP: i32 = 0x1000;
+const SF_NO_CLIP: i32 = 0x4000;
+
+/// 字体族 + 字体 + 排版格式，析构时一起释放
+struct TextCtx {
+    family: *mut core::ffi::c_void,
+    font: *mut core::ffi::c_void,
+    format: *mut core::ffi::c_void,
+}
+
+impl Drop for TextCtx {
+    fn drop(&mut self) {
+        unsafe {
+            GdipDeleteStringFormat(self.format);
+            GdipDeleteFont(self.font);
+            GdipDeleteFontFamily(self.family);
+        }
+    }
+}
+
+unsafe fn text_ctx(spec: &FontSpec) -> Option<TextCtx> {
+    let name = crate::win::to_wide(spec.face);
+    let mut family: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreateFontFamilyFromName(name.as_ptr(), core::ptr::null_mut(), &mut family) != 0
+        || family.is_null()
+    {
+        return None;
+    }
+    let mut font: *mut core::ffi::c_void = core::ptr::null_mut();
+    let style = if spec.bold { FONT_STYLE_BOLD } else { 0 };
+    if GdipCreateFont(family, spec.px, style, UNIT_PIXEL, &mut font) != 0 || font.is_null() {
+        GdipDeleteFontFamily(family);
+        return None;
+    }
+    let mut format: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreateStringFormat(0, 0, &mut format) != 0 || format.is_null() {
+        GdipDeleteFont(font);
+        GdipDeleteFontFamily(family);
+        return None;
+    }
+    GdipSetStringFormatFlags(format, SF_NO_WRAP | SF_NO_CLIP);
+    Some(TextCtx {
+        family,
+        font,
+        format,
+    })
+}
+
+/// 量一行文字的宽高。高度是行高，用来做垂直居中。
+pub unsafe fn measure_text(dc: HDC, spec: &FontSpec, s: &str) -> (i32, i32) {
+    let mut g: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
+        return (0, 0);
+    }
+    let Some(ctx) = text_ctx(spec) else {
+        GdipDeleteGraphics(g);
+        return (0, 0);
+    };
+    let wide: Vec<u16> = s.encode_utf16().collect();
+    let layout = RectF {
+        x: 0.0,
+        y: 0.0,
+        w: 4000.0,
+        h: 400.0,
+    };
+    let mut bounds = RectF::default();
+    let st = GdipMeasureString(
+        g,
+        wide.as_ptr(),
+        wide.len() as i32,
+        ctx.font,
+        &layout,
+        ctx.format,
+        &mut bounds,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+    );
+    GdipDeleteGraphics(g);
+    if st != 0 {
+        return (0, 0);
+    }
+    (bounds.w.ceil() as i32, bounds.h.ceil() as i32)
+}
+
+/// 在 (x, y) 画一行字，y 是行框顶部。
+pub unsafe fn draw_text(dc: HDC, spec: &FontSpec, colorref: u32, x: i32, y: i32, s: &str) {
+    let mut g: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
+        return;
+    }
+    GdipSetTextRenderingHint(g, TEXT_ANTIALIAS);
+
+    let Some(ctx) = text_ctx(spec) else {
+        GdipDeleteGraphics(g);
+        return;
+    };
+    let mut brush: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreateSolidFill(argb(colorref), &mut brush) != 0 {
+        GdipDeleteGraphics(g);
+        return;
+    }
+    let wide: Vec<u16> = s.encode_utf16().collect();
+    let layout = RectF {
+        x: x as f32,
+        y: y as f32,
+        w: 4000.0,
+        h: 400.0,
+    };
+    GdipDrawString(
+        g,
+        wide.as_ptr(),
+        wide.len() as i32,
+        ctx.font,
+        &layout,
+        ctx.format,
+        brush,
+    );
+    GdipDeleteBrush(brush);
+    GdipDeleteGraphics(g);
 }

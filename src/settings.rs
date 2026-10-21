@@ -10,24 +10,23 @@
 use crate::config::{
     hotkey_parts, Config, DEFAULT_MOD, DEFAULT_VK, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
-use crate::win::{delete_font, hinstance, pt_in, rect, to_wide, ui_font_ex, ui_font_w};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use crate::gdiplus::FontSpec;
+use crate::win::{hinstance, pt_in, rect, to_wide};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetTextExtentPoint32W,
-    InvalidateRect, SelectObject, SetBkMode, SetTextCharacterExtra, SetTextColor, TextOutW, HDC,
-    HFONT, HGDIOBJ, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, SetBkMode, HDC,
+    HGDIOBJ, PAINTSTRUCT, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, HCURSOR,
-    IDC_ARROW, IDC_HAND,
+    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics,
     LoadCursorW, PostMessageW, RegisterClassW, SetCursor, SetForegroundWindow, ShowWindow,
-    CS_HREDRAW, CS_VREDRAW, HTCLIENT, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, WM_APP, WM_DESTROY,
-    WM_ERASEBKGND,
-    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION, WS_EX_TOOLWINDOW, WS_OVERLAPPED, WS_SYSMENU,
+    CS_HREDRAW, CS_VREDRAW, HCURSOR, HTCLIENT, IDC_ARROW, IDC_HAND, SM_CXSCREEN, SM_CYSCREEN,
+    SW_SHOW, WM_APP, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MOUSEMOVE,
+    WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION, WS_EX_TOOLWINDOW,
+    WS_OVERLAPPED, WS_SYSMENU,
 };
 
 const CLASS: &str = "SmartPasteSettings";
@@ -73,6 +72,10 @@ const KEY_TXT: u32 = rgb(0x33, 0x33, 0x3C);
 const PLUS: u32 = rgb(0xA6, 0xA6, 0xB0);
 const HOVER_BG: u32 = rgb(0xF2, 0xF2, 0xF5);
 
+/// 描边宽度要跟着 1.6 倍缩放走。
+/// 写死 1px 的话，在 16px 半径的圆角上会断成一节一节，看着发毛。
+const HAIRLINE: f32 = 1.6;
+
 // ---- 布局：左右 24 外边距，行高按 8 的倍数走 ----
 const W: i32 = ui(480);
 const H: i32 = ui(250);
@@ -107,13 +110,13 @@ struct State {
     reset_rect: RECT,
     hand: HCURSOR,
 
-    f_h1: HFONT,
-    f_body: HFONT,
-    f_key: HFONT,
-    f_plus: HFONT,
-    f_section: HFONT,
-    f_link: HFONT,
-    f_action: HFONT,
+    f_h1: FontSpec,
+    f_body: FontSpec,
+    f_key: FontSpec,
+    f_plus: FontSpec,
+    f_section: FontSpec,
+    f_link: FontSpec,
+    f_action: FontSpec,
 }
 
 static mut S: Option<Box<State>> = None;
@@ -208,13 +211,13 @@ pub fn open(parent: HWND) {
             reset_rect: rect(0, 0, 0, 0),
             hand: LoadCursorW(std::ptr::null_mut(), IDC_HAND),
 
-            f_h1: ui_font_w(ui(15), 600),
-            f_body: ui_font_w(ui(12), 400),
-            f_key: ui_font_ex(ui(14), 600, "Segoe UI"),
-            f_plus: ui_font_ex(ui(14), 400, "Segoe UI"),
-            f_section: ui_font_w(ui(11), 600),
-            f_link: ui_font_w(ui(13), 400),
-            f_action: ui_font_w(ui(13), 600),
+            f_h1: FontSpec::new(ui(15) as f32, true, "Microsoft YaHei"),
+            f_body: FontSpec::new(ui(12) as f32, false, "Microsoft YaHei"),
+            f_key: FontSpec::new(ui(14) as f32, true, "Segoe UI"),
+            f_plus: FontSpec::new(ui(14) as f32, false, "Segoe UI"),
+            f_section: FontSpec::new(ui(11) as f32, true, "Microsoft YaHei"),
+            f_link: FontSpec::new(ui(13) as f32, false, "Microsoft YaHei"),
+            f_action: FontSpec::new(ui(13) as f32, true, "Microsoft YaHei"),
         }));
 
         ShowWindow(hwnd, SW_SHOW);
@@ -330,7 +333,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         // 主键的 keydown 可能被系统吞了（Alt 组合常见），
                         // 这里用 keyup 带回的 vk 和刚才记下的修饰键兜底
                         let pv = if s.pend_vk != 0 { s.pend_vk } else { vk };
-                        let pm = if s.pend_mod != 0 { s.pend_mod } else { s.live_mod };
+                        let pm = if s.pend_mod != 0 {
+                            s.pend_mod
+                        } else {
+                            s.live_mod
+                        };
                         if pm != 0 {
                             apply_hotkey(s, pv, pm);
                         }
@@ -346,19 +353,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 0
             }
             WM_DESTROY => {
-                if let Some(st) = S.take() {
-                    for f in [
-                        st.f_h1,
-                        st.f_body,
-                        st.f_key,
-                        st.f_plus,
-                        st.f_section,
-                        st.f_link,
-                        st.f_action,
-                    ] {
-                        delete_font(f);
-                    }
-                }
+                S = None;
                 0
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -390,31 +385,22 @@ unsafe fn solid(dc: HDC, r: &RECT, color: u32) {
     DeleteObject(b as HGDIOBJ);
 }
 
-unsafe fn measure(dc: HDC, font: HFONT, s: &str) -> (i32, i32) {
-    let wide = to_wide(s);
-    let old = SelectObject(dc, font as HGDIOBJ);
-    let mut sz: SIZE = std::mem::zeroed();
-    GetTextExtentPoint32W(dc, wide.as_ptr(), (wide.len() - 1) as i32, &mut sz);
-    SelectObject(dc, old);
-    (sz.cx, sz.cy)
+unsafe fn measure(dc: HDC, font: FontSpec, s: &str) -> (i32, i32) {
+    crate::gdiplus::measure_text(dc, &font, s)
 }
 
-unsafe fn text(dc: HDC, font: HFONT, color: u32, x: i32, y: i32, s: &str) {
-    let wide = to_wide(s);
-    let old = SelectObject(dc, font as HGDIOBJ);
-    SetTextColor(dc, color);
-    TextOutW(dc, x, y, wide.as_ptr(), (wide.len() - 1) as i32);
-    SelectObject(dc, old);
+unsafe fn text(dc: HDC, font: FontSpec, color: u32, x: i32, y: i32, s: &str) {
+    crate::gdiplus::draw_text(dc, &font, color, x, y, s);
 }
 
 /// 以 (cx, cy) 为中心画一行字
-unsafe fn text_at(dc: HDC, font: HFONT, color: u32, cx: i32, cy: i32, s: &str) {
+unsafe fn text_at(dc: HDC, font: FontSpec, color: u32, cx: i32, cy: i32, s: &str) {
     let (w, h) = measure(dc, font, s);
     text(dc, font, color, cx - w / 2, cy - h / 2, s);
 }
 
 /// 按给定内边距算出每个键帽的宽度和总宽
-unsafe fn key_widths(dc: HDC, font: HFONT, parts: &[String], pad: i32) -> (Vec<i32>, i32) {
+unsafe fn key_widths(dc: HDC, font: FontSpec, parts: &[String], pad: i32) -> (Vec<i32>, i32) {
     let mut widths = Vec::with_capacity(parts.len());
     let mut total = 0;
     for p in parts {
@@ -453,7 +439,7 @@ unsafe fn draw_keycaps(s: &State, dc: HDC, avail: i32) -> RECT {
     for (i, p) in parts.iter().enumerate() {
         let r = rect(x, top, x + widths[i], top + KEY_H);
         crate::gdiplus::fill_round(dc, &r, ui(7) as f32, bg);
-        crate::gdiplus::stroke_round(dc, &r, ui(7) as f32, border, 1.0);
+        crate::gdiplus::stroke_round(dc, &r, ui(7) as f32, border, HAIRLINE);
         text_at(dc, s.f_key, KEY_TXT, (r.left + r.right) / 2, ROW1_CY, p);
 
         x += widths[i];
@@ -463,10 +449,7 @@ unsafe fn draw_keycaps(s: &State, dc: HDC, avail: i32) -> RECT {
         }
     }
 
-    expand(
-        &rect(CR - total, top, CR, top + KEY_H),
-        ui(8),
-    )
+    expand(&rect(CR - total, top, CR, top + KEY_H), ui(8))
 }
 
 unsafe fn paint(s: &mut State) {
@@ -478,19 +461,18 @@ unsafe fn paint(s: &mut State) {
     solid(hdc, &rc, BG);
     SetBkMode(hdc, TRANSPARENT as i32);
 
-    // 分区标签：小字号 + 字距，跟正文拉开层级
-    let extra = SetTextCharacterExtra(hdc, ui(1));
+    // 分区标签：字号更小、颜色更浅，和正文拉开层级
     text(hdc, s.f_section, TXT_LABEL, PAD, ui(24), "快捷键");
-    SetTextCharacterExtra(hdc, extra);
 
     // 卡片
     crate::gdiplus::fill_round(hdc, &CARD, ui(10) as f32, CARD_BG);
-    crate::gdiplus::stroke_round(hdc, &CARD, ui(10) as f32, CARD_BORDER, 1.0);
+    crate::gdiplus::stroke_round(hdc, &CARD, ui(10) as f32, CARD_BORDER, HAIRLINE);
 
     // 第一行左侧：标题 + 说明，两行作为一块垂直居中
     let (_, h1) = measure(hdc, s.f_h1, "截图快捷键");
     let (_, h2) = measure(hdc, s.f_body, "点击按键框");
-    let gap = ui(4);
+    // GDI+ 的行高里已经含了下沉部分，再额外加间距会显得两行离得远
+    let gap = 0;
     let top = ROW1_CY - (h1 + gap + h2) / 2;
     text(hdc, s.f_h1, TXT_1, CX, top, "截图快捷键");
 
@@ -512,7 +494,14 @@ unsafe fn paint(s: &mut State) {
         let pill = rect(CR - ui(196), ROW1_CY - ui(17), CR, ROW1_CY + ui(17));
         crate::gdiplus::fill_round(hdc, &pill, ui(9) as f32, ACCENT_BG);
         crate::gdiplus::stroke_round(hdc, &pill, ui(9) as f32, ACCENT, ui(2) as f32);
-        text_at(hdc, s.f_action, ACCENT, (pill.left + pill.right) / 2, ROW1_CY, "按下组合键…");
+        text_at(
+            hdc,
+            s.f_action,
+            ACCENT,
+            (pill.left + pill.right) / 2,
+            ROW1_CY,
+            "按下组合键…",
+        );
         s.hot_rect = expand(&pill, ui(8));
     } else {
         s.hot_rect = draw_keycaps(s, hdc, avail);

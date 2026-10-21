@@ -94,6 +94,8 @@ resources/      app.rc：图标 + VERSIONINFO
 assets/         图标源文件（svg / png / ico）、工具栏雪碧图
 scripts/        从 SVG 重新生成图标的脚本（构建资源用）
 temp/          开发期调试脚本与临时产物（git 忽略，不入库）
+
+开发约定见 [AGENTS.md](AGENTS.md)：渲染铁律、验证方法、踩过的坑。
 ```
 
 ## 设计取舍
