@@ -9,6 +9,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=resources/app.rc");
     println!("cargo:rerun-if-changed=assets/smartpaste.ico");
+    println!("cargo:rerun-if-changed=resources/app.manifest");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;

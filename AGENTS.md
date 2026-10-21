@@ -94,8 +94,19 @@ max(max(p)-min(p) for p in crop.getdata())              # 看彩边
   系统当菜单加速键吞掉，只有 keyup 能收到。录制热键时要两类消息都处理，并用
   `GetAsyncKeyState` 兜底修饰键状态（`GetKeyState` 依赖本线程队列进度，会读到 0）。
 - **录制热键前必须先注销已有热键**，否则按到当前生效的组合会被系统直接拿去触发截图。
-- 窗口是 per-monitor DPI aware，但 UI 尺寸用的是硬编码 `UI_SCALE = 1.6`，
-  **不是**系统 DPI。改缩放只改这一个常量，但 `icons::SIZE` 是独立硬编码的，要一起改。
+- 窗口是 per-monitor DPI aware，但 UI 尺寸用的是硬编码缩放，**不是**系统 DPI：
+  遮罩 `overlay.rs` 用 1.6（截图时的临时 UI，可以大），设置面板 `settings.rs` 用 1.25
+  （常态窗口，贴近系统字号）。`icons::SIZE` 是独立硬编码的，改缩放要一起改。
+- **没有 manifest 时，Win11 会把进程当旧程序**：窗口方角、标题栏是 Win10 的直角按钮。
+  `resources/app.manifest` 里的 `supportedOS` 那一段就是修这个的，别删。
+- 设置窗口的标题栏是自绘的（原生 caption 的关闭按钮改不了圆角）。两个要点：
+  1. `WM_NCCALCSIZE` 必须返回 0，而且要在取全局 State 之前处理——它在
+     `CreateWindowExW` 内部就会发一次，那时 State 还没建好，落到 `DefWindowProc`
+     就会把原生标题栏算进去，之后再也去不掉。
+  2. 创建时 `wParam` 是 `FALSE`，只挡 `TRUE` 的话初始标题栏仍会留下，两种都要返回 0；
+     建完再 `SetWindowPos(..., SWP_FRAMECHANGED)` 强制重算一次最稳。
+- 自绘标题栏要保留 `WS_CAPTION` 但去掉非客户区，DWM 的圆角和阴影才会继续生效；
+  拖动靠 `WM_NCHITTEST` 返回 `HTCAPTION`，关闭按钮那块返回 `HTCLIENT`。
 
 ---
 
@@ -110,9 +121,15 @@ max(max(p)-min(p) for p in crop.getdata())              # 看彩边
 ## 6. UI 规格速查
 
 ```rust
-UI_SCALE = (8, 5)          // 1.6 倍
-ui(v) = v * 8 / 5          // 所有尺寸都过这个函数
+// overlay.rs：1.6 倍（截图时的临时 UI）
+UI_SCALE = (8, 5)
+ui(v) = v * 8 / 5
+
+// settings.rs：1.25 倍（常态窗口，对齐系统 125% DPI）
+UI_SCALE = (5, 4)
 ```
+
+所有尺寸都过各自的 `ui()`，不要写死像素。
 
 | 用途 | 值 |
 | --- | --- |
