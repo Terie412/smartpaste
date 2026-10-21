@@ -58,14 +58,14 @@ const fn ui(v: i32) -> i32 {
 const RADIUS_BAR: i32 = ui(16);
 const RADIUS_CHIP: i32 = ui(12);
 
-const BTN_W: i32 = ui(48);
+// 正方形按钮：宽高一致，比原来的横向长条紧凑
+const BTN_W: i32 = ui(34);
 const BTN_H: i32 = ui(34);
 const GAP: i32 = ui(8);
 
 /// 属性条上一格的大小。
-/// 取 44 而不是 ui(30)=48：最多 12 格时 12*44=528，
-/// 刚好和工具栏的 7*76=532 对齐，两行左边缘不会错开
-const PROP_W: i32 = 44;
+/// 取 32 让 12 格 = 384，和工具栏 7*54=378 基本对齐
+const PROP_W: i32 = 32;
 const PROP_H: i32 = ui(34);
 
 /// 预设色（COLORREF：0x00BBGGRR）
@@ -772,16 +772,16 @@ unsafe fn draw_props(
         match *prop {
             Prop::Color(idx) => {
                 let sel = style.color == COLORS[idx];
-                let d = rect(cx - ui(9), cy - ui(9), cx + ui(9), cy + ui(9));
+                let d = rect(cx - ui(7), cy - ui(7), cx + ui(7), cy + ui(7));
                 round_fill(dc, &d, 8, COLORS[idx]);
                 if sel {
                     round_stroke(
                         dc,
                         &rect(
-                            d.left - ui(3),
-                            d.top - ui(3),
-                            d.right + ui(3),
-                            d.bottom + ui(3),
+                            d.left - ui(2),
+                            d.top - ui(2),
+                            d.right + ui(2),
+                            d.bottom + ui(2),
                         ),
                         RADIUS_CHIP,
                         rgb(0x2A, 0x2A, 0x30),
@@ -797,14 +797,14 @@ unsafe fn draw_props(
                 let c = if sel { ON } else { OFF };
                 let pen = CreatePen(PS_SOLID, shown, rgb(c.0, c.1, c.2));
                 let old = SelectObject(dc, pen as HGDIOBJ);
-                MoveToEx(dc, cx - ui(9), cy, std::ptr::null_mut());
-                LineTo(dc, cx + ui(9), cy);
+                MoveToEx(dc, cx - ui(7), cy, std::ptr::null_mut());
+                LineTo(dc, cx + ui(7), cy);
                 SelectObject(dc, old);
                 DeleteObject(pen as HGDIOBJ);
                 if sel {
                     round_stroke_w(
                         dc,
-                        &rect(cx - ui(11), cy - ui(11), cx + ui(11), cy + ui(11)),
+                        &rect(cx - ui(9), cy - ui(9), cx + ui(9), cy + ui(9)),
                         RADIUS_CHIP,
                         rgb(0x2E, 0x2E, 0x36),
                         2,
@@ -812,7 +812,7 @@ unsafe fn draw_props(
                 }
             }
             Prop::Filled => {
-                let b = rect(cx - ui(8), cy - ui(8), cx + ui(8), cy + ui(8));
+                let b = rect(cx - ui(6), cy - ui(6), cx + ui(6), cy + ui(6));
                 if style.filled {
                     round_fill(dc, &b, RADIUS_CHIP, rgb(ON.0, ON.1, ON.2));
                 } else {
@@ -825,9 +825,9 @@ unsafe fn draw_props(
                 let old = SelectObject(dc, pen as HGDIOBJ);
                 if style.dashed {
                     for k in 0..3 {
-                        let x0 = cx - ui(9) + k * ui(7);
+                        let x0 = cx - ui(7) + k * ui(5);
                         MoveToEx(dc, x0, cy, std::ptr::null_mut());
-                        LineTo(dc, x0 + ui(4), cy);
+                        LineTo(dc, x0 + ui(3), cy);
                     }
                 } else {
                     MoveToEx(dc, cx - 9, cy, std::ptr::null_mut());
@@ -840,7 +840,7 @@ unsafe fn draw_props(
                 let sel = style.round == is_round;
                 let c = if sel { ON } else { OFF };
                 // 圆/方选择器也走 GDI+，小圆的边缘最吃抗锯齿
-                let frame = rect(cx - ui(8), cy - ui(8), cx + ui(8), cy + ui(8));
+                let frame = rect(cx - ui(6), cy - ui(6), cx + ui(6), cy + ui(6));
                 let col = rgb(c.0, c.1, c.2);
                 if is_round {
                     crate::gdiplus::ellipse(dc, &frame, col, ui(2) as f32);
@@ -850,7 +850,7 @@ unsafe fn draw_props(
                 if sel {
                     round_stroke_w(
                         dc,
-                        &rect(cx - ui(13), cy - ui(13), cx + ui(13), cy + ui(13)),
+                        &rect(cx - ui(10), cy - ui(10), cx + ui(10), cy + ui(10)),
                         RADIUS_CHIP,
                         rgb(0x2E, 0x2E, 0x36),
                         ui(2),
