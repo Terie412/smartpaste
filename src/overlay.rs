@@ -28,12 +28,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, PostMessageW, RegisterClassW, SendMessageW,
-    SetForegroundWindow, SetWindowPos, ShowWindow, EC_LEFTMARGIN, EC_RIGHTMARGIN, EN_CHANGE,
-    ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
+    GetWindowTextLengthW, GetWindowTextW, LoadCursorW, PostMessageW, RegisterClassW, SendMessageW,
+    SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow, EC_LEFTMARGIN, EC_RIGHTMARGIN,
+    EN_CHANGE, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, HCURSOR, IDC_SIZEALL, IDC_SIZENESW,
+    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
     WM_APP, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_PAINT, WM_RBUTTONUP, WNDCLASSW, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE,
+    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP, WS_VISIBLE,
 };
 
 // EDIT 的子类化走 comctl32。
@@ -271,6 +272,16 @@ pub struct Button {
     pub icon: usize,
 }
 
+/// 锁定后的拖拽类型
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Grab {
+    None,
+    /// 拖选区内部：整体移动
+    Move,
+    /// 拖边/角：位掩码 1 左 2 右 4 上 8 下
+    Edge(u8),
+}
+
 pub struct Overlay {
     pub hwnd: HWND,
     pub screen: Screen,
@@ -292,6 +303,15 @@ pub struct Overlay {
     pub hex_mode: bool,
     pub draft: Option<Shape>,
     pub drawing: bool,
+    /// 锁定状态下正在拖选区（移动或改边）
+    grab: Grab,
+    grab_rect: RECT,
+    grab_from: POINT,
+    cur_we: HCURSOR,
+    cur_ns: HCURSOR,
+    cur_nwse: HCURSOR,
+    cur_nesw: HCURSOR,
+    cur_all: HCURSOR,
     pub doc: Doc,
     /// 正在输入的 EDIT 子窗口，null 表示没在编辑
     text_edit: HWND,
@@ -523,6 +543,127 @@ impl Overlay {
             self.buttons[0].rect.top,
             py - PROP_H - GAP
         ));
+    }
+
+    /// 点落在选区的哪条边上（位掩码），不在边带内返回 0
+    fn edge_zone(&self, s: &RECT, x: i32, y: i32) -> u8 {
+        let band = ui(4);
+        if x < s.left - band || x > s.right + band || y < s.top - band || y > s.bottom + band {
+            return 0;
+        }
+        let mut z = 0;
+        if (x - s.left).abs() <= band {
+            z |= 1;
+        }
+        if (x - s.right).abs() <= band {
+            z |= 2;
+        }
+        if (y - s.top).abs() <= band {
+            z |= 4;
+        }
+        if (y - s.bottom).abs() <= band {
+            z |= 8;
+        }
+        z
+    }
+
+    fn grab_cursor(&self, zone: u8) -> Option<HCURSOR> {
+        let (l, r, t, b) = (zone & 1 != 0, zone & 2 != 0, zone & 4 != 0, zone & 8 != 0);
+        if (l && t) || (r && b) {
+            return Some(self.cur_nwse);
+        }
+        if (r && t) || (l && b) {
+            return Some(self.cur_nesw);
+        }
+        if l || r {
+            return Some(self.cur_we);
+        }
+        if t || b {
+            return Some(self.cur_ns);
+        }
+        None
+    }
+
+    unsafe fn begin_grab(&mut self, x: i32, y: i32, zone: u8) {
+        let Some(s) = self.selection() else { return };
+        self.grab = if zone == 0 {
+            Grab::Move
+        } else {
+            Grab::Edge(zone)
+        };
+        self.grab_rect = s;
+        self.grab_from = POINT { x, y };
+        self.hover = -1;
+        self.hover_prop = -1;
+        SetCursor(self.grab_cursor(zone).unwrap_or(self.cur_all));
+        crate::win::trace(&format!(
+            "sel: grab zone={zone} rect=({},{},{},{})",
+            s.left, s.top, s.right, s.bottom
+        ));
+    }
+
+    unsafe fn grab_update(&mut self, x: i32, y: i32) {
+        if self.grab == Grab::None {
+            return;
+        }
+        let (dx, dy) = (x - self.grab_from.x, y - self.grab_from.y);
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        self.grab_from = POINT { x, y };
+
+        let old = self.grab_rect;
+        let mut r = old;
+        let min = ui(8);
+        match self.grab {
+            Grab::Move => {
+                let w = r.right - r.left;
+                let h = r.bottom - r.top;
+                r.left = (r.left + dx).max(0).min((self.screen.width - w).max(0));
+                r.top = (r.top + dy).max(0).min((self.screen.height - h).max(0));
+                r.right = r.left + w;
+                r.bottom = r.top + h;
+            }
+            Grab::Edge(z) => {
+                if z & 1 != 0 {
+                    r.left = (r.left + dx).max(0).min((r.right - min).max(0));
+                }
+                if z & 2 != 0 {
+                    r.right = (r.right + dx).max(r.left + min).min(self.screen.width);
+                }
+                if z & 4 != 0 {
+                    r.top = (r.top + dy).max(0).min((r.bottom - min).max(0));
+                }
+                if z & 8 != 0 {
+                    r.bottom = (r.bottom + dy).max(r.top + min).min(self.screen.height);
+                }
+            }
+            Grab::None => {}
+        }
+
+        // 元素坐标相对选区左上角，左上角一动就得反向平移，标注才钉在屏幕原处
+        self.doc.shift(old.left - r.left, old.top - r.top);
+        self.grab_rect = r;
+        self.start = POINT {
+            x: r.left,
+            y: r.top,
+        };
+        self.cur = POINT {
+            x: r.right,
+            y: r.bottom,
+        };
+        self.layout_buttons();
+        InvalidateRect(self.hwnd, std::ptr::null(), 0);
+    }
+
+    unsafe fn end_grab(&mut self) {
+        if self.grab == Grab::None {
+            return;
+        }
+        self.grab = Grab::None;
+        ReleaseCapture();
+        self.layout_buttons();
+        InvalidateRect(self.hwnd, std::ptr::null(), 0);
     }
 
     fn hit_button(&self, x: i32, y: i32) -> i32 {
@@ -1397,6 +1538,12 @@ extern "system" fn overlay_wndproc(
             WM_MOUSEMOVE => {
                 let (x, y) = (lo(lparam), hi(lparam));
 
+                // 正在拖选区：移动或改边，其它逻辑都让路
+                if ov.grab != Grab::None {
+                    ov.grab_update(x, y);
+                    return 0;
+                }
+
                 // 取色浮层跟着光标走，只有还没框选时才需要
                 if !ov.locked {
                     let sx = x + ov.screen.x;
@@ -1439,13 +1586,24 @@ extern "system" fn overlay_wndproc(
                 } else if pidx >= 0 {
                     apply_prop(ov, pidx);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
-                } else if ov.locked && ov.tool.is_some() {
+                } else if ov.locked {
                     if let Some(s) = ov.selection() {
-                        if pt_in(&s, x, y) {
-                            if ov.tool == Some(Tool::Text) {
-                                ov.start_text(x, y);
+                        let zone = ov.edge_zone(&s, x, y);
+                        // Ctrl 按住时，即使选了工具也是移动选区（画不了的时候的出口）
+                        let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
+                        if zone != 0 {
+                            ov.begin_grab(x, y, zone);
+                            SetCapture(hwnd);
+                        } else if pt_in(&s, x, y) {
+                            if ov.tool.is_some() && !ctrl {
+                                if ov.tool == Some(Tool::Text) {
+                                    ov.start_text(x, y);
+                                } else {
+                                    ov.stroke_begin(x, y);
+                                }
+                                SetCapture(hwnd);
                             } else {
-                                ov.stroke_begin(x, y);
+                                ov.begin_grab(x, y, 0);
                                 SetCapture(hwnd);
                             }
                         }
@@ -1460,6 +1618,10 @@ extern "system" fn overlay_wndproc(
             }
             WM_LBUTTONUP => {
                 let (x, y) = (lo(lparam), hi(lparam));
+                if ov.grab != Grab::None {
+                    ov.end_grab();
+                    return 0;
+                }
                 if ov.drawing {
                     ov.stroke_end();
                     ReleaseCapture();
@@ -1583,6 +1745,29 @@ extern "system" fn overlay_wndproc(
                 }
                 0
             }
+            // 锁定后：边上显示缩放光标，内部显示移动光标
+            WM_SETCURSOR => {
+                if ov.locked {
+                    let mut pt: POINT = std::mem::zeroed();
+                    GetCursorPos(&mut pt);
+                    let (x, y) = (pt.x - ov.screen.x, pt.y - ov.screen.y);
+                    if let Some(s) = ov.selection() {
+                        let zone = ov.edge_zone(&s, x, y);
+                        if let Some(c) = ov.grab_cursor(zone) {
+                            SetCursor(c);
+                            return 1;
+                        }
+                        if zone == 0 && pt_in(&s, x, y) {
+                            let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
+                            if ov.tool.is_none() || ctrl {
+                                SetCursor(ov.cur_all);
+                                return 1;
+                            }
+                        }
+                    }
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
             WM_PAINT => {
                 ov.paint();
                 0
@@ -1699,6 +1884,14 @@ pub fn start() -> bool {
             },
             draft: None,
             drawing: false,
+            grab: Grab::None,
+            grab_rect: rect(0, 0, 0, 0),
+            grab_from: POINT { x: 0, y: 0 },
+            cur_we: LoadCursorW(std::ptr::null_mut(), IDC_SIZEWE),
+            cur_ns: LoadCursorW(std::ptr::null_mut(), IDC_SIZENS),
+            cur_nwse: LoadCursorW(std::ptr::null_mut(), IDC_SIZENWSE),
+            cur_nesw: LoadCursorW(std::ptr::null_mut(), IDC_SIZENESW),
+            cur_all: LoadCursorW(std::ptr::null_mut(), IDC_SIZEALL),
             doc: Doc::default(),
             text_edit: std::ptr::null_mut(),
             text_at: POINT { x: 0, y: 0 },

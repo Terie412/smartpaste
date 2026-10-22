@@ -117,6 +117,36 @@ impl Doc {
     pub fn is_empty(&self) -> bool {
         self.shapes.is_empty()
     }
+
+    /// 整体平移所有元素。
+    ///
+    /// 元素坐标是相对选区左上角存的，选区一移动/改左边界，
+    /// 就得反向平移，标注才会钉在屏幕原处而不是跟着选区跑。
+    pub fn shift(&mut self, dx: i32, dy: i32) {
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        for s in &mut self.shapes {
+            match &mut s.kind {
+                Kind::Arrow { a, b } | Kind::Box { a, b } => {
+                    a.x += dx;
+                    a.y += dy;
+                    b.x += dx;
+                    b.y += dy;
+                }
+                Kind::Pen { pts } | Kind::Eraser { pts } => {
+                    for p in pts {
+                        p.x += dx;
+                        p.y += dy;
+                    }
+                }
+                Kind::Text { at, .. } => {
+                    at.x += dx;
+                    at.y += dy;
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- 绘制
