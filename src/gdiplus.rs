@@ -341,25 +341,6 @@ pub unsafe fn ellipse(dc: HDC, r: &RECT, colorref: u32, width: f32) {
     GdipDeletePen(pen);
 }
 
-/// 带透明度的矩形填充（ARGB）
-pub unsafe fn fill_rect_argb(dc: HDC, r: &RECT, color: u32) {
-    let mut brush: *mut core::ffi::c_void = core::ptr::null_mut();
-    if GdipCreateSolidFill(color, &mut brush) != 0 {
-        return;
-    }
-    with_graphics(dc, |g| {
-        GdipFillRectangle(
-            g,
-            brush,
-            r.left as f32,
-            r.top as f32,
-            (r.right - r.left) as f32,
-            (r.bottom - r.top) as f32,
-        );
-    });
-    GdipDeleteBrush(brush);
-}
-
 pub unsafe fn rect_stroke(dc: HDC, r: &RECT, colorref: u32, width: f32) {
     let mut pen: *mut core::ffi::c_void = core::ptr::null_mut();
     if GdipCreatePen1(argb(colorref), width, UNIT_PIXEL, &mut pen) != 0 {

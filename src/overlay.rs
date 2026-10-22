@@ -616,6 +616,17 @@ impl Overlay {
         self.predict = Some(r);
     }
 
+    /// 预测区域转换成客户区坐标（back buffer 坐标）
+    fn predict_client(&self) -> Option<RECT> {
+        let r = self.predict?;
+        Some(rect(
+            r.left - self.screen.x,
+            r.top - self.screen.y,
+            r.right - self.screen.x,
+            r.bottom - self.screen.y,
+        ))
+    }
+
     /// 点落在选区的哪条边上（位掩码），不在边带内返回 0
     fn edge_zone(&self, s: &RECT, x: i32, y: i32) -> u8 {
         let band = ui(4);
@@ -1028,8 +1039,16 @@ impl Overlay {
             // 1. 底图
             BitBlt(self.back_dc, 0, 0, w, h, self.screen.hdc, 0, 0, SRCCOPY);
 
-            // 2. 蒙层
-            match self.selection() {
+            // 2. 蒙层。还没框选时，预测区域要留出来——它应该看起来
+            // 和正式选区一样是正常亮度，而不是在蒙层上刷一层颜色。
+            let hole = self.selection().or_else(|| {
+                if self.dragging {
+                    None
+                } else {
+                    self.predict_client()
+                }
+            });
+            match hole {
                 Some(s) => {
                     blend(self.mask_dc, self.back_dc, 0, 0, w, s.top);
                     blend(self.mask_dc, self.back_dc, 0, s.top, s.left, s.bottom);
@@ -1039,17 +1058,10 @@ impl Overlay {
                 None => blend(self.mask_dc, self.back_dc, 0, 0, w, h),
             }
 
-            // 预测区域：蒙层之上画一层淡色底 + 描边。
-            // 一旦按下鼠标（开始拖）就不再显示，但值保留着，单击还要用它。
+            // 预测区域只描一条边：区域本身已经在蒙层里留空了，
+            // 再填色反而会盖住内容。按下鼠标（开始拖）就不再画。
             if !self.locked && !self.dragging {
-                if let Some(r) = self.predict {
-                    let pr = rect(
-                        r.left - self.screen.x,
-                        r.top - self.screen.y,
-                        r.right - self.screen.x,
-                        r.bottom - self.screen.y,
-                    );
-                    crate::gdiplus::fill_rect_argb(self.back_dc, &pr, 0x2A_FF2E63);
+                if let Some(pr) = self.predict_client() {
                     crate::gdiplus::rect_stroke(self.back_dc, &pr, 0xFF2E63, 1.0);
                 }
             }
