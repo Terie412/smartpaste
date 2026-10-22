@@ -85,6 +85,8 @@ const RADIUS_BAR: i32 = ui(16);
 /// 选中态底色。不用描边——深色边框在白色工具条上太跳，加深底色就够了。
 const SEL_BG: u32 = 0x00EB_E3E3; // #E3E3EB
 const RADIUS_CHIP: i32 = ui(12);
+/// 属性格底块用的小圆角。36px 的格子上用 RADIUS_CHIP 会糊成胶囊。
+const RADIUS_CELL: i32 = ui(8);
 
 // 正方形按钮：宽高一致，比原来的横向长条紧凑
 const BTN_W: i32 = ui(34);
@@ -93,8 +95,9 @@ const GAP: i32 = ui(8);
 
 /// 属性条上一格的大小。
 /// 取 32 让 12 格 = 384，和工具栏 7*54=378 基本对齐
-const PROP_W: i32 = 32;
-const PROP_H: i32 = ui(34);
+/// 属性格是正方形（36×36）。12 格正好和 8 个工具按钮等宽（432），两条边能对齐。
+const PROP_W: i32 = 36;
+const PROP_H: i32 = 36;
 
 /// 预设色（COLORREF：0x00BBGGRR）
 const COLORS: [u32; 6] = [
@@ -434,9 +437,9 @@ impl Overlay {
             (Act::Tool(Tool::Pen), 6),
             (Act::Tool(Tool::Text), 7),
             (Act::Tool(Tool::Eraser), 8),
-            (Act::Copy, 0),
             (Act::Save, 1),
             (Act::Pin, 2),
+            (Act::Copy, 0),
         ];
 
         let total = items.len() as i32 * BTN_W;
@@ -1091,7 +1094,7 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
                     r.right - ui(2),
                     r.bottom - ui(3),
                 ),
-                RADIUS_CHIP,
+                RADIUS_CELL,
                 SEL_BG,
             );
         } else if hover_prop == i as i32 {
@@ -1103,7 +1106,7 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
                     r.right - ui(2),
                     r.bottom - ui(3),
                 ),
-                RADIUS_CHIP,
+                RADIUS_CELL,
                 rgb(0xF1, 0xF1, 0xF5),
             );
         }
@@ -1131,14 +1134,11 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
                         "A",
                     );
                 } else {
-                    // 显示粗细按档位序号放大，跟实际像素脱钩，三档才分得开
-                    let shown = ui(2) + idx as i32 * ui(2);
-                    let pen = CreatePen(PS_SOLID, shown, rgb(c.0, c.1, c.2));
-                    let old = SelectObject(dc, pen as HGDIOBJ);
-                    MoveToEx(dc, cx - ui(7), cy, std::ptr::null_mut());
-                    LineTo(dc, cx + ui(7), cy);
-                    SelectObject(dc, old);
-                    DeleteObject(pen as HGDIOBJ);
+                    // 三档粗细画成圆头药丸。GDI 直线没有抗锯齿，
+                    // 端点会啃出硬台阶，这里交给 GDI+ 画圆角矩形。
+                    let shown = (ui(2) + idx as i32 * ui(2)).max(3);
+                    let r = rect(cx - ui(7), cy - shown / 2, cx + ui(7), cy + shown / 2);
+                    crate::gdiplus::fill_round(dc, &r, shown as f32 / 2.0, rgb(c.0, c.1, c.2));
                 }
                 let _ = sel;
             }
