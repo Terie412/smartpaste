@@ -16,12 +16,13 @@ use crate::win::{delete_font, hinstance, pt_in, rect, to_wide, ui_font, ui_font_
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows_sys::Win32::Graphics::Gdi::{
-    AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject,
+    AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
+    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject,
     GetTextExtentPoint32W, GetTextMetricsW, IntersectClipRect, InvalidateRect, Rectangle,
-    ReleaseDC, RestoreDC, SaveDC, ScreenToClient, SelectObject, SetBkMode, SetTextColor, TextOutW,
-    UpdateWindow, AC_SRC_OVER, BLENDFUNCTION, HDC, HFONT, HGDIOBJ, HOLLOW_BRUSH, NULL_BRUSH,
-    PAINTSTRUCT, PS_SOLID, SRCCOPY, TEXTMETRICW, TRANSPARENT,
+    ReleaseDC, RestoreDC, SaveDC, ScreenToClient, SelectObject, SetBkMode, SetStretchBltMode,
+    SetTextColor, StretchBlt, TextOutW, UpdateWindow, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, BLENDFUNCTION, COLORONCOLOR, DIB_RGB_COLORS, HDC, HFONT, HGDIOBJ, HOLLOW_BRUSH,
+    NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_C, VK_CONTROL,
@@ -317,6 +318,11 @@ pub struct Overlay {
     icons: IconSet,
     back_dc: HDC,
     back_bmp: windows_sys::Win32::Graphics::Gdi::HBITMAP,
+    /// 放大镜：9x9 的 DIB，逐像素填好后 StretchBlt 放大（COLORONCOLOR 就是最近邻）
+    lens_dc: HDC,
+    #[allow(dead_code)]
+    lens_bmp: windows_sys::Win32::Graphics::Gdi::HBITMAP,
+    lens_bits: *mut u32,
     mask_dc: HDC,
     mask_bmp: windows_sys::Win32::Graphics::Gdi::HBITMAP,
     label_font: HFONT,
@@ -1141,6 +1147,8 @@ impl Overlay {
                     self.cursor,
                     self.hex_mode,
                     self.label_font,
+                    self.lens_dc,
+                    self.lens_bits,
                 );
             }
 
@@ -1527,28 +1535,60 @@ unsafe fn draw_props(
 /// 预备截图的取色浮层：色块 + 光标下像素的颜色值。
 ///
 /// 跟着光标走，右下偏移；贴到屏幕边就翻到另一侧，始终完整可见。
-unsafe fn draw_color_hud(dc: HDC, screen: &Screen, cursor: POINT, hex: bool, font: HFONT) {
+unsafe fn draw_color_hud(
+    dc: HDC,
+    screen: &Screen,
+    cursor: POINT,
+    hex: bool,
+    font: HFONT,
+    lens_dc: HDC,
+    lens_bits: *mut u32,
+) {
     let Some((r, g, b)) = sample_pixel(screen, cursor.x, cursor.y) else {
         return;
     };
+
+    // 放大 9x9：中心那一格就是光标所在像素
+    const N: i32 = 9;
+    let zoom = ui(6).max(6);
+    let grid = N * zoom;
+    for dy in 0..N {
+        for dx in 0..N {
+            let (pr, pg, pb) = sample_pixel(screen, cursor.x + dx - N / 2, cursor.y + dy - N / 2)
+                .unwrap_or((0, 0, 0));
+            let px = ((pr as u32) << 16) | ((pg as u32) << 8) | pb as u32;
+            *lens_bits.add((dy * N + dx) as usize) = px;
+        }
+    }
+
     let text = color_text(r, g, b, hex);
-    let wide = to_wide(&text);
+    let coord = format!("{}, {}", cursor.x, cursor.y);
+    let small = ui_font_w(ui(10), 400);
 
-    let old_f = SelectObject(dc, font as HGDIOBJ);
-    let mut size: windows_sys::Win32::Foundation::SIZE = std::mem::zeroed();
-    GetTextExtentPoint32W(dc, wide.as_ptr(), (wide.len() - 1) as i32, &mut size);
-    SelectObject(dc, old_f);
+    let measure = |f: HFONT, s: &str| -> (i32, i32) {
+        let wide = to_wide(s);
+        let old = SelectObject(dc, f as HGDIOBJ);
+        let mut sz: windows_sys::Win32::Foundation::SIZE = std::mem::zeroed();
+        GetTextExtentPoint32W(dc, wide.as_ptr(), (wide.len() - 1) as i32, &mut sz);
+        SelectObject(dc, old);
+        (sz.cx, sz.cy)
+    };
+    let (w1, h1) = measure(font, &text);
+    let (w2, h2) = measure(small, &coord);
 
-    let sw = ui(22);
     let pad = ui(8);
-    let gap = ui(8);
-    let bw = pad * 2 + sw + gap + size.cx;
-    let bh = size.cy.max(sw) + pad * 2;
+    let gap = ui(6);
+    let sw = ui(22);
+    let text_w = w1.max(w2);
+    let text_h = h1 + ui(2) + h2;
+    let content_w = grid.max(sw + gap + text_w);
+    let row_h = sw.max(text_h);
+    let bw = pad * 2 + content_w;
+    let bh = pad * 2 + grid + gap + row_h;
 
     let off = ui(18);
     let right = screen.x + screen.width;
     let bottom = screen.y + screen.height;
-
     let mut bx = cursor.x + off;
     let mut by = cursor.y + off;
     if bx + bw > right {
@@ -1564,27 +1604,66 @@ unsafe fn draw_color_hud(dc: HDC, screen: &Screen, cursor: POINT, hex: bool, fon
     round_fill(dc, &bg, RADIUS_CHIP, rgb(0x0A, 0x0A, 0x0C));
     round_stroke(dc, &bg, RADIUS_CHIP, rgb(0x4A, 0x4A, 0x52));
 
-    // 色块就是采样到的颜色本身
+    // 放大镜本体：COLORONCOLOR 就是最近邻，放大后每格都是纯色方块
+    let gx = bx + pad + (content_w - grid) / 2;
+    let gy = by + pad;
+    SetStretchBltMode(dc, COLORONCOLOR);
+    StretchBlt(dc, gx, gy, grid, grid, lens_dc, 0, 0, N, N, SRCCOPY);
+    frame_colored(
+        dc,
+        &rect(gx - 1, gy - 1, gx + grid + 1, gy + grid + 1),
+        rgb(0x4A, 0x4A, 0x52),
+    );
+
+    // 中心格：外黑内白两道框，深浅底上都看得清
+    let ccx = gx + (N / 2) * zoom;
+    let ccy = gy + (N / 2) * zoom;
+    frame(dc, &rect(ccx, ccy, ccx + zoom, ccy + zoom));
+
+    // 下面一行：色块 + 颜色值 + 坐标
+    let row_y = gy + grid + gap;
     let chip = rect(
         bx + pad,
-        by + (bh - sw) / 2,
+        row_y + (row_h - sw) / 2,
         bx + pad + sw,
-        by + (bh + sw) / 2,
+        row_y + (row_h + sw) / 2,
     );
     round_fill(dc, &chip, ui(4), rgb(r, g, b));
     round_stroke(dc, &chip, ui(4), rgb(0x6A, 0x6A, 0x72));
 
+    let tx = bx + pad + sw + gap;
+    let ty = row_y + (row_h - text_h) / 2;
     SetBkMode(dc, TRANSPARENT as i32);
+
     SetTextColor(dc, rgb(0xFF, 0xFF, 0xFF));
     let old_f = SelectObject(dc, font as HGDIOBJ);
+    let wide = to_wide(&text);
+    TextOutW(dc, tx, ty, wide.as_ptr(), (wide.len() - 1) as i32);
+    SelectObject(dc, old_f);
+
+    SetTextColor(dc, rgb(0x9A, 0x9A, 0xA4));
+    let old_s = SelectObject(dc, small as HGDIOBJ);
+    let wide2 = to_wide(&coord);
     TextOutW(
         dc,
-        bx + pad + sw + gap,
-        by + (bh - size.cy) / 2,
-        wide.as_ptr(),
-        (wide.len() - 1) as i32,
+        tx,
+        ty + h1 + ui(2),
+        wide2.as_ptr(),
+        (wide2.len() - 1) as i32,
     );
-    SelectObject(dc, old_f);
+    SelectObject(dc, old_s);
+    DeleteObject(small as HGDIOBJ);
+}
+
+/// 1px 描边矩形（GDI 的描边是精确像素，比 GDI+ 的半像素更锐）
+unsafe fn frame_colored(dc: HDC, r: &RECT, color: u32) {
+    let pen = CreatePen(PS_SOLID, 1, color);
+    let old_p = SelectObject(dc, pen as HGDIOBJ);
+    let old_b = SelectObject(dc, GetStockObject(HOLLOW_BRUSH) as HGDIOBJ);
+    Rectangle(dc, r.left, r.top, r.right, r.bottom);
+    SelectObject(dc, old_p);
+    SelectObject(dc, old_b);
+    DeleteObject(pen as HGDIOBJ);
 }
 
 /// 从 back buffer 里取回选区像素 —— 保存/复制要带上标注
@@ -2060,6 +2139,25 @@ pub fn start() -> bool {
         let back_bmp = CreateCompatibleBitmap(desktop_dc, vw, vh);
         SelectObject(back_dc, back_bmp as HGDIOBJ);
 
+        let lens_dc = CreateCompatibleDC(desktop_dc);
+        let mut lens_bi: BITMAPINFO = std::mem::zeroed();
+        lens_bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        lens_bi.bmiHeader.biWidth = 9;
+        lens_bi.bmiHeader.biHeight = -9; // 负高度 = 自上而下，行序更直观
+        lens_bi.bmiHeader.biPlanes = 1;
+        lens_bi.bmiHeader.biBitCount = 32;
+        lens_bi.bmiHeader.biCompression = BI_RGB;
+        let mut lens_bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let lens_bmp = CreateDIBSection(
+            desktop_dc,
+            &lens_bi,
+            DIB_RGB_COLORS,
+            &mut lens_bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        SelectObject(lens_dc, lens_bmp as HGDIOBJ);
+
         let mask_dc = CreateCompatibleDC(desktop_dc);
         let mask_bmp = CreateCompatibleBitmap(desktop_dc, 1, 1);
         SelectObject(mask_dc, mask_bmp as HGDIOBJ);
@@ -2120,6 +2218,9 @@ pub fn start() -> bool {
             icons: crate::icons::load(),
             back_dc,
             back_bmp,
+            lens_dc,
+            lens_bmp,
+            lens_bits: lens_bits as *mut u32,
             mask_dc,
             mask_bmp,
             label_font: ui_font(ui(12)),
@@ -2165,6 +2266,7 @@ pub fn start() -> bool {
         let mut cp: POINT = std::mem::zeroed();
         GetCursorPos(&mut cp);
         if let Some(ov) = OVERLAY.as_mut() {
+            ov.cursor = POINT { x: cp.x, y: cp.y };
             ov.refresh_predict(cp.x - vx, cp.y - vy);
         }
         crate::win::trace(&format!("overlay: started {vw}x{vh} at ({vx},{vy})"));
