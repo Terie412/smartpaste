@@ -231,6 +231,9 @@ impl Tool {
     }
 }
 
+/// 放大镜的边长（像素格数）
+const LENS_N: i32 = 15;
+
 /// 属性条上的一格
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Prop {
@@ -1548,16 +1551,16 @@ unsafe fn draw_color_hud(
         return;
     };
 
-    // 放大 9x9：中心那一格就是光标所在像素
-    const N: i32 = 9;
-    let zoom = ui(6).max(6);
-    let grid = N * zoom;
-    for dy in 0..N {
-        for dx in 0..N {
-            let (pr, pg, pb) = sample_pixel(screen, cursor.x + dx - N / 2, cursor.y + dy - N / 2)
+    // 放大 LENS_N×LENS_N：中心那一格就是光标所在像素
+    let n = LENS_N;
+    let zoom = ui(4).max(5);
+    let grid = n * zoom;
+    for dy in 0..n {
+        for dx in 0..n {
+            let (pr, pg, pb) = sample_pixel(screen, cursor.x + dx - n / 2, cursor.y + dy - n / 2)
                 .unwrap_or((0, 0, 0));
             let px = ((pr as u32) << 16) | ((pg as u32) << 8) | pb as u32;
-            *lens_bits.add((dy * N + dx) as usize) = px;
+            *lens_bits.add((dy * n + dx) as usize) = px;
         }
     }
 
@@ -1608,7 +1611,7 @@ unsafe fn draw_color_hud(
     let gx = bx + pad + (content_w - grid) / 2;
     let gy = by + pad;
     SetStretchBltMode(dc, COLORONCOLOR);
-    StretchBlt(dc, gx, gy, grid, grid, lens_dc, 0, 0, N, N, SRCCOPY);
+    StretchBlt(dc, gx, gy, grid, grid, lens_dc, 0, 0, n, n, SRCCOPY);
     frame_colored(
         dc,
         &rect(gx - 1, gy - 1, gx + grid + 1, gy + grid + 1),
@@ -1616,8 +1619,8 @@ unsafe fn draw_color_hud(
     );
 
     // 中心格：外黑内白两道框，深浅底上都看得清
-    let ccx = gx + (N / 2) * zoom;
-    let ccy = gy + (N / 2) * zoom;
+    let ccx = gx + (n / 2) * zoom;
+    let ccy = gy + (n / 2) * zoom;
     frame(dc, &rect(ccx, ccy, ccx + zoom, ccy + zoom));
 
     // 下面一行：色块 + 颜色值 + 坐标
@@ -2142,8 +2145,8 @@ pub fn start() -> bool {
         let lens_dc = CreateCompatibleDC(desktop_dc);
         let mut lens_bi: BITMAPINFO = std::mem::zeroed();
         lens_bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        lens_bi.bmiHeader.biWidth = 9;
-        lens_bi.bmiHeader.biHeight = -9; // 负高度 = 自上而下，行序更直观
+        lens_bi.bmiHeader.biWidth = LENS_N;
+        lens_bi.bmiHeader.biHeight = -LENS_N; // 负高度 = 自上而下，行序更直观
         lens_bi.bmiHeader.biPlanes = 1;
         lens_bi.bmiHeader.biBitCount = 32;
         lens_bi.bmiHeader.biCompression = BI_RGB;
