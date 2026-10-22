@@ -14,27 +14,29 @@ use crate::edit::{self, Doc, Kind, Shape, Style};
 use crate::icons::IconSet;
 use crate::win::{delete_font, hinstance, pt_in, rect, to_wide, ui_font, ui_font_w};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject,
     GetTextExtentPoint32W, GetTextMetricsW, IntersectClipRect, InvalidateRect, Rectangle,
-    ReleaseDC, RestoreDC, SaveDC, SelectObject, SetBkMode, SetTextColor, TextOutW, UpdateWindow,
-    AC_SRC_OVER, BLENDFUNCTION, HDC, HFONT, HGDIOBJ, HOLLOW_BRUSH, NULL_BRUSH, PAINTSTRUCT,
-    PS_SOLID, SRCCOPY, TEXTMETRICW, TRANSPARENT,
+    ReleaseDC, RestoreDC, SaveDC, ScreenToClient, SelectObject, SetBkMode, SetTextColor, TextOutW,
+    UpdateWindow, AC_SRC_OVER, BLENDFUNCTION, HDC, HFONT, HGDIOBJ, HOLLOW_BRUSH, NULL_BRUSH,
+    PAINTSTRUCT, PS_SOLID, SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_C, VK_CONTROL,
     VK_ESCAPE, VK_RETURN, VK_S, VK_SHIFT, VK_Z,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, LoadCursorW, PostMessageW, RegisterClassW, SendMessageW,
-    SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, EC_LEFTMARGIN,
+    ChildWindowFromPointEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
+    GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    LoadCursorW, PostMessageW, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
+    SetWindowPos, ShowWindow, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, EC_LEFTMARGIN,
     EC_RIGHTMARGIN, EN_CHANGE, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, HCURSOR, IDC_SIZEALL,
     IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-    SW_HIDE, SW_SHOW, WM_APP, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW,
-    WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    SW_SHOW, WM_APP, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_CHILD, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 // EDIT 的子类化走 comctl32。
@@ -67,10 +69,6 @@ const WM_SETFONT: u32 = 0x0030;
 const WM_TEXT_COMMIT: u32 = WM_APP + 5;
 /// 取消文本输入
 const WM_TEXT_CANCEL: u32 = WM_APP + 6;
-/// UIA 预测轮询定时器
-const TIMER_PREDICT: usize = 2;
-/// 选区预测开关。当前实现不稳定（见 uia.rs 顶部注释），先关掉。
-const PREDICT_ON: bool = false;
 
 const CLASS_NAME: &str = "SmartPasteOverlay";
 const MASK_ALPHA: u8 = 128;
@@ -307,12 +305,10 @@ pub struct Overlay {
     pub hex_mode: bool,
     pub draft: Option<Shape>,
     pub drawing: bool,
-    /// UIA 预测出来的区域（未锁定时的悬停高亮）
+    /// 预测出来的区域（未锁定时的悬停高亮）
     pub predict: Option<RECT>,
-    /// 上一次查询用的坐标和时刻，用来做节流
-    predict_at: POINT,
-    last_move: std::time::Instant,
-    last_query: std::time::Instant,
+    /// 打开遮罩之前的前台窗口，预测就从它算
+    prev_fg: HWND,
     /// 锁定状态下正在拖选区（移动或改边）
     grab: Grab,
     grab_rect: RECT,
@@ -444,6 +440,32 @@ unsafe extern "system" fn text_edit_proc(
     DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
+/// 窗口的真实可见边界。
+///
+/// Win10 起 GetWindowRect 会把四周那圈看不见的拖拽边框也算进去（约 7px），
+/// 直接用会比看到的窗口大一圈。DWM 的 EXTENDED_FRAME_BOUNDS 才是视觉边界，
+/// 拿不到再退回 GetWindowRect。
+unsafe fn window_bounds(hwnd: HWND) -> Option<RECT> {
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut r: RECT = std::mem::zeroed();
+    let rc = DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+        &mut r as *mut RECT as *mut core::ffi::c_void,
+        std::mem::size_of::<RECT>() as u32,
+    );
+    if rc >= 0 && r.right > r.left && r.bottom > r.top {
+        return Some(r);
+    }
+    let mut g: RECT = std::mem::zeroed();
+    if GetWindowRect(hwnd, &mut g) != 0 && g.right > g.left {
+        return Some(g);
+    }
+    None
+}
+
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
@@ -555,50 +577,43 @@ impl Overlay {
         ));
     }
 
-    /// 用 UIA 预测光标下的区域。
+    /// 预测光标下的区域。
     ///
-    /// 遮罩挡着 UIA 的命中测试（UIA 会给每个可见窗口合成一个元素），
-    /// 所以查询的这几十毫秒要先把遮罩藏起来。屏幕内容没变的话看不出闪。
-    unsafe fn query_predict(&mut self, x: i32, y: i32) {
-        self.predict_at = POINT { x, y };
-        self.last_query = std::time::Instant::now();
-        if x < 0 || y < 0 || x >= self.screen.width || y >= self.screen.height {
-            self.predict = None;
+    /// 只做到"窗口"这一级：打开遮罩前记住的前台窗口，再用
+    /// ChildWindowFromPointEx 细化到子窗口（去掉标题栏/菜单）。
+    /// 不追求元素级精度——预测本来就是提示性质的，而窗口级零依赖、
+    /// 零延迟、不会闪，也不会干扰任何现有交互。
+    unsafe fn refresh_predict(&mut self, x: i32, y: i32) {
+        self.predict = None;
+        if self.prev_fg.is_null() {
             return;
         }
 
-        // 遮罩挡着 UIA 的窗口级命中（它会给每个可见窗口合成一个元素），
-        // 查询这几十毫秒先把遮罩藏起来；屏幕内容没变的话看不出闪。
         let (sx, sy) = (x + self.screen.x, y + self.screen.y);
-        ShowWindow(self.hwnd, SW_HIDE);
-        let seq = crate::uia::request(sx, sy);
-        let t0 = std::time::Instant::now();
-        let mut got = None;
-        while t0.elapsed().as_millis() < 120 {
-            if let Some(r) = crate::uia::take(seq) {
-                got = r;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
+        let Some(wr) = window_bounds(self.prev_fg) else {
+            return;
+        };
+        if sx < wr.left || sx >= wr.right || sy < wr.top || sy >= wr.bottom {
+            return;
         }
 
-        ShowWindow(self.hwnd, SW_SHOW);
-        // 隐藏会让窗口失去前台，得抢回来，否则 Esc / Ctrl+Z 收不到
-        SetForegroundWindow(self.hwnd);
-        SetFocus(self.hwnd);
+        // 细化到光标所在的那个子窗口：浏览器/编辑器的客户区都在子窗口里
+        let mut pt = POINT { x: sx, y: sy };
+        ScreenToClient(self.prev_fg, &mut pt);
+        let child =
+            ChildWindowFromPointEx(self.prev_fg, pt, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT);
+        let target = if child.is_null() { self.prev_fg } else { child };
+        let mut r = window_bounds(target).unwrap_or(wr);
 
-        // 太小的（边缘线、1px 分隔）和小到没法用的都丢掉
-        self.predict = got.map(|(r, _)| r).filter(|r| {
-            let w = r.right - r.left;
-            let h = r.bottom - r.top;
-            w >= 8 && h >= 8
-        });
-        crate::win::trace(&format!(
-            "uia: predict={:?}",
-            self.predict
-                .map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top))
-        ));
-        InvalidateRect(self.hwnd, std::ptr::null(), 0);
+        // 夹到屏幕里
+        r.left = r.left.max(self.screen.x);
+        r.top = r.top.max(self.screen.y);
+        r.right = r.right.min(self.screen.x + self.screen.width);
+        r.bottom = r.bottom.min(self.screen.y + self.screen.height);
+        if r.right - r.left < 8 || r.bottom - r.top < 8 {
+            return;
+        }
+        self.predict = Some(r);
     }
 
     /// 点落在选区的哪条边上（位掩码），不在边带内返回 0
@@ -1616,7 +1631,21 @@ extern "system" fn overlay_wndproc(
 
                 // 取色浮层跟着光标走，只有还没框选时才需要
                 if !ov.locked {
-                    ov.last_move = std::time::Instant::now();
+                    let before = ov.predict;
+                    ov.refresh_predict(x, y);
+                    let changed = match (before, ov.predict) {
+                        (None, None) => false,
+                        (Some(a), Some(b)) => {
+                            a.left != b.left
+                                || a.top != b.top
+                                || a.right != b.right
+                                || a.bottom != b.bottom
+                        }
+                        _ => true,
+                    };
+                    if changed {
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
                     let sx = x + ov.screen.x;
                     let sy = y + ov.screen.y;
                     if ov.cursor.x != sx || ov.cursor.y != sy {
@@ -1861,27 +1890,6 @@ extern "system" fn overlay_wndproc(
                 crate::win::trace("overlay: WM_GETOBJECT -> 0");
                 0
             } // WM_GETOBJECT
-            WM_TIMER => {
-                if PREDICT_ON
-                    && wparam == TIMER_PREDICT
-                    && !ov.locked
-                    && !ov.dragging
-                    && ov.drawing == false
-                {
-                    let mut pt: POINT = std::mem::zeroed();
-                    GetCursorPos(&mut pt);
-                    let (cx, cy) = (pt.x - ov.screen.x, pt.y - ov.screen.y);
-                    // 光标停稳 120ms、位置变了、鼠标没按下，才查一次
-                    let idle = ov.last_move.elapsed().as_millis() > 120;
-                    let moved = cx != ov.predict_at.x || cy != ov.predict_at.y;
-                    let lmb = GetAsyncKeyState(0x01) < 0;
-                    let cooldown = ov.last_query.elapsed().as_millis() > 150;
-                    if idle && moved && !lmb && cooldown {
-                        ov.query_predict(cx, cy);
-                    }
-                }
-                0
-            }
             WM_PAINT => {
                 ov.paint();
                 0
@@ -1966,6 +1974,8 @@ pub fn start() -> bool {
         DeleteObject(black as HGDIOBJ);
         ReleaseDC(std::ptr::null_mut(), desktop_dc);
 
+        // 遮罩出现前的前台窗口，就是用户最想截的那个
+        let prev_fg = GetForegroundWindow();
         OVERLAY = Some(Box::new(Overlay {
             hwnd: std::ptr::null_mut(),
             screen,
@@ -1999,9 +2009,7 @@ pub fn start() -> bool {
             draft: None,
             drawing: false,
             predict: None,
-            predict_at: POINT { x: -1, y: -1 },
-            last_move: std::time::Instant::now(),
-            last_query: std::time::Instant::now(),
+            prev_fg,
             grab: Grab::None,
             grab_rect: rect(0, 0, 0, 0),
             grab_from: POINT { x: 0, y: 0 },
@@ -2048,8 +2056,6 @@ pub fn start() -> bool {
         }
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
-        crate::uia::start("SmartPasteOverlay");
-        SetTimer(hwnd, TIMER_PREDICT, 60, None);
         SetFocus(hwnd);
         crate::win::trace(&format!("overlay: started {vw}x{vh} at ({vx},{vy})"));
 

@@ -11,7 +11,6 @@ mod icons;
 mod overlay;
 mod pin;
 mod settings;
-mod uia;
 mod win;
 
 use std::path::PathBuf;
