@@ -35,8 +35,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     EC_RIGHTMARGIN, EN_CHANGE, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, HCURSOR, IDC_SIZEALL,
     IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
     SW_SHOW, WM_APP, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_CHILD, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_CHILD,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 // EDIT 的子类化走 comctl32。
@@ -145,9 +145,8 @@ impl Tool {
             Prop::Color(4),
             Prop::Color(5),
         ];
-        const WIDTHS_3: [Prop; 3] = [Prop::Width(0), Prop::Width(1), Prop::Width(2)];
 
-        static SHAPE: [Prop; 15] = [
+        static SHAPE: [Prop; 13] = [
             // 形状 | 颜色 | 填充 | 粗细
             Prop::Round(false),
             Prop::Round(true),
@@ -161,11 +160,9 @@ impl Tool {
             Prop::Sep,
             Prop::Filled,
             Prop::Sep,
-            Prop::Width(0),
-            Prop::Width(1),
-            Prop::Width(2),
+            Prop::Width,
         ];
-        static ARROW: [Prop; 12] = [
+        static ARROW: [Prop; 10] = [
             // 颜色 | 线型 | 粗细
             Prop::Color(0),
             Prop::Color(1),
@@ -176,11 +173,9 @@ impl Tool {
             Prop::Sep,
             Prop::Dashed,
             Prop::Sep,
-            Prop::Width(0),
-            Prop::Width(1),
-            Prop::Width(2),
+            Prop::Width,
         ];
-        static PEN: [Prop; 10] = [
+        static PEN: [Prop; 8] = [
             // 颜色 | 粗细
             Prop::Color(0),
             Prop::Color(1),
@@ -189,11 +184,9 @@ impl Tool {
             Prop::Color(4),
             Prop::Color(5),
             Prop::Sep,
-            Prop::Width(0),
-            Prop::Width(1),
-            Prop::Width(2),
+            Prop::Width,
         ];
-        static TEXT: [Prop; 14] = [
+        static TEXT: [Prop; 12] = [
             // 颜色 | 字号 | 字效
             Prop::Color(0),
             Prop::Color(1),
@@ -202,25 +195,21 @@ impl Tool {
             Prop::Color(4),
             Prop::Color(5),
             Prop::Sep,
-            Prop::Width(0),
-            Prop::Width(1),
-            Prop::Width(2),
+            Prop::Width,
             Prop::Sep,
             Prop::Bold,
             Prop::Stroke,
             Prop::Shadow,
         ];
-        static ERASER: [Prop; 6] = [
+        static ERASER: [Prop; 4] = [
             // 粗细 | 形状
-            Prop::Width(0),
-            Prop::Width(1),
-            Prop::Width(2),
+            Prop::Width,
             Prop::Sep,
             Prop::Round(false),
             Prop::Round(true),
         ];
 
-        let _ = (COLORS_6, WIDTHS_3);
+        let _ = COLORS_6;
         match self {
             Tool::Shape => &SHAPE,
             Tool::Arrow => &ARROW,
@@ -231,11 +220,12 @@ impl Tool {
     }
 
     /// 笔触档位因工具而异：橡皮明显要粗得多，文本这一档是字号
-    fn width_at(self, i: usize) -> i32 {
+    /// 这个工具线宽/字号的可用区间。滚轮按 1 步调，所以区间要够宽。
+    fn width_range(self) -> (i32, i32) {
         match self {
-            Tool::Eraser => [12, 24, 40][i.min(2)],
-            Tool::Text => [18, 26, 34][i.min(2)],
-            _ => [2, 4, 7][i.min(2)],
+            Tool::Text => (10, 72),
+            Tool::Eraser => (6, 80),
+            _ => (1, 24),
         }
     }
 }
@@ -244,7 +234,7 @@ impl Tool {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Prop {
     Color(usize),
-    Width(usize),
+    Width,
     Filled,
     Dashed,
     /// true = 圆/椭圆，false = 矩形
@@ -1112,6 +1102,10 @@ impl Overlay {
                         self.hover_prop,
                         &self.styles[tool.idx()],
                         tool,
+                        POINT {
+                            x: self.cursor.x - self.screen.x,
+                            y: self.cursor.y - self.screen.y,
+                        },
                     );
                 }
             }
@@ -1307,7 +1301,14 @@ unsafe fn draw_bar(
     round_stroke(dc, &bar, RADIUS_BAR, rgb(0xD6, 0xD6, 0xDC));
 }
 
-unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &Style, tool: Tool) {
+unsafe fn draw_props(
+    dc: HDC,
+    props: &[(RECT, Prop)],
+    hover_prop: i32,
+    style: &Style,
+    tool: Tool,
+    cursor: POINT,
+) {
     use windows_sys::Win32::Graphics::Gdi::{LineTo, MoveToEx};
 
     if props.is_empty() {
@@ -1339,7 +1340,6 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
         // 选中态：加深底色（悬停盖在它上面时仍保留选中的深浅差别）
         let selected = match *prop {
             Prop::Color(idx) => style.color == COLORS[idx],
-            Prop::Width(idx) => style.width == tool.width_at(idx),
             Prop::Round(is_round) => style.round == is_round,
             _ => false,
         };
@@ -1375,30 +1375,14 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
                 round_fill(dc, &d, 8, COLORS[idx]);
                 round_stroke(dc, &d, 8, rgb(0xD8, 0xD8, 0xDE));
             }
-            Prop::Width(idx) => {
-                let sel = style.width == tool.width_at(idx);
-                let c = if sel { ON } else { OFF };
-                if tool == Tool::Text {
-                    // 文本：三档字号用大中小三个 A，比画三根线直观
-                    let px = (ui(8) + idx as i32 * ui(3)) as f32;
-                    let spec = crate::gdiplus::FontSpec::new(px, false, "Segoe UI");
-                    let (w, h) = crate::gdiplus::measure_text(dc, &spec, "A");
-                    crate::gdiplus::draw_text(
-                        dc,
-                        &spec,
-                        rgb(c.0, c.1, c.2),
-                        cx - w / 2,
-                        cy - h / 2,
-                        "A",
-                    );
-                } else {
-                    // 三档粗细画成圆头药丸。GDI 直线没有抗锯齿，
-                    // 端点会啃出硬台阶，这里交给 GDI+ 画圆角矩形。
-                    let shown = (ui(2) + idx as i32 * ui(2)).max(3);
-                    let r = rect(cx - ui(7), cy - shown / 2, cx + ui(7), cy + shown / 2);
-                    crate::gdiplus::fill_round(dc, &r, shown as f32 / 2.0, rgb(c.0, c.1, c.2));
-                }
-                let _ = sel;
+            Prop::Width => {
+                // 半径体现粗细。按各自的取值区间归一化，滑块感才准：
+                // 形状 1~24、橡皮 6~80、文本 10~72，同一个点位置含义一致。
+                let (lo, hi) = tool.width_range();
+                let k = (style.width.clamp(lo, hi) - lo) as f32 / (hi - lo).max(1) as f32;
+                let r = 3.5 + k * 8.0;
+                let d = rect(cx - r as i32, cy - r as i32, cx + r as i32, cy + r as i32);
+                crate::gdiplus::fill_ellipse(dc, &d, rgb(ON.0, ON.1, ON.2));
             }
             Prop::Filled => {
                 // 圆角要小：RADIUS_CHIP 在 20px 的框上会变成圆，和"圆角"图标撞车
@@ -1475,6 +1459,46 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
     }
 
     round_stroke(dc, &bar, RADIUS_BAR, rgb(0xD6, 0xD6, 0xDC));
+
+    // 光标停在粗细格上时，上方浮一个当前数值
+    if hover_prop >= 0 {
+        if let Some((_, Prop::Width)) = props.get(hover_prop as usize) {
+            let text = format!("{} px", style.width);
+            let wide = to_wide(&text);
+            let font = crate::win::ui_font_w(ui(11), 600);
+            let old = SelectObject(dc, font as HGDIOBJ);
+            let mut sz: windows_sys::Win32::Foundation::SIZE = std::mem::zeroed();
+            GetTextExtentPoint32W(dc, wide.as_ptr(), (wide.len() - 1) as i32, &mut sz);
+            let (pad_x, pad_y) = (ui(7), ui(4));
+            let (bw, bh) = (sz.cx + pad_x * 2, sz.cy + pad_y * 2);
+            // 跟着光标走，靠边就翻到另一侧
+            let mut bx = cursor.x + ui(10);
+            if bx + bw > bar.right {
+                bx = cursor.x - bw - ui(10);
+            }
+            let mut by = cursor.y + ui(18);
+            if by + bh > bar.bottom + ui(120) {
+                by = cursor.y - bh - ui(12);
+            }
+            round_fill(
+                dc,
+                &rect(bx, by, bx + bw, by + bh),
+                ui(6),
+                rgb(0x2E, 0x2E, 0x36),
+            );
+            SetBkMode(dc, TRANSPARENT as i32);
+            SetTextColor(dc, rgb(0xFF, 0xFF, 0xFF));
+            TextOutW(
+                dc,
+                bx + pad_x,
+                by + pad_y,
+                wide.as_ptr(),
+                (wide.len() - 1) as i32,
+            );
+            SelectObject(dc, old);
+            DeleteObject(font as HGDIOBJ);
+        }
+    }
 }
 
 /// 预备截图的取色浮层：色块 + 光标下像素的颜色值。
@@ -1661,14 +1685,11 @@ extern "system" fn overlay_wndproc(
                     }
                 }
 
-                // 取色浮层跟着光标走，只有还没框选时才需要
-                if !ov.locked {
-                    let sx = x + ov.screen.x;
-                    let sy = y + ov.screen.y;
-                    if ov.cursor.x != sx || ov.cursor.y != sy {
-                        ov.cursor = POINT { x: sx, y: sy };
-                        InvalidateRect(hwnd, std::ptr::null(), 0);
-                    }
+                // 光标位置：取色浮层和属性条的提示框都要用
+                let (sx, sy) = (x + ov.screen.x, y + ov.screen.y);
+                if ov.cursor.x != sx || ov.cursor.y != sy {
+                    ov.cursor = POINT { x: sx, y: sy };
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
 
                 if ov.drawing {
@@ -1684,6 +1705,27 @@ extern "system" fn overlay_wndproc(
                         ov.hover = idx;
                         ov.hover_prop = pidx;
                         InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                }
+                0
+            }
+            // 滚轮：光标停在粗细格上时调整线宽
+            WM_MOUSEWHEEL => {
+                let delta = ((wparam >> 16) & 0xFFFF) as i16 as i32;
+                if delta != 0 {
+                    if let Some(tool) = ov.tool {
+                        let on_width = matches!(
+                            ov.props.get(ov.hover_prop.max(0) as usize),
+                            Some((_, Prop::Width))
+                        );
+                        if on_width {
+                            let (lo, hi) = tool.width_range();
+                            let st = &mut ov.styles[tool.idx()];
+                            let step = if delta > 0 { 1 } else { -1 };
+                            st.width = (st.width + step).clamp(lo, hi);
+                            save_styles(ov);
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        }
                     }
                 }
                 0
@@ -1932,7 +1974,7 @@ fn apply_prop(ov: &mut Overlay, idx: i32) {
     let st = &mut ov.styles[tool.idx()];
     match prop {
         Prop::Color(i) => st.color = COLORS[i.min(COLORS.len() - 1)],
-        Prop::Width(i) => st.width = tool.width_at(i),
+        Prop::Width => {}
         Prop::Filled => st.filled = !st.filled,
         Prop::Dashed => st.dashed = !st.dashed,
         Prop::Round(b) => st.round = b,
