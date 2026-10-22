@@ -7,7 +7,7 @@ use crate::gdiplus::FontSpec;
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPath, CreatePen, CreateSolidBrush, DeleteObject, Ellipse, EndPath, GetStockObject,
-    Polyline, Rectangle, SelectObject, SetBkMode, SetTextColor, StrokePath, TextOutW, HDC, HGDIOBJ,
+    Polyline, SelectObject, SetBkMode, SetTextColor, StrokePath, TextOutW, HDC, HGDIOBJ,
     NULL_BRUSH, NULL_PEN, PS_SOLID, TRANSPARENT,
 };
 
@@ -166,14 +166,47 @@ pub fn draw(dc: HDC, s: &Shape, ox: i32, oy: i32) {
 unsafe fn arrow(dc: HDC, st: &Style, a: POINT, b: POINT, ox: i32, oy: i32) {
     let (x0, y0) = (a.x + ox, a.y + oy);
     let (x1, y1) = (b.x + ox, b.y + oy);
-    // 一律走 GDI+：GDI 的直线没有抗锯齿，斜线全是台阶
-    stroke_aa(dc, st, x0, y0, x1, y1);
+    let dx = (x1 - x0) as f32;
+    let dy = (y1 - y0) as f32;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let head = head_len(st);
+
+    // 太短就只画个头
+    if len < head * 1.2 {
+        if st.head {
+            head_tri(dc, st, (x0, y0), (x1, y1));
+        }
+        return;
+    }
+
+    // 线身两端各让出箭头长度的一大半。
+    // 不让的话，方头笔帽会从三角尖端捅出去，箭尖看起来是平的。
+    let back = if st.head { head * 0.8 } else { 0.0 };
+    let front = if st.tail { head * 0.8 } else { 0.0 };
+    stroke_aa(
+        dc,
+        st,
+        x0 + (ux * front) as i32,
+        y0 + (uy * front) as i32,
+        x1 - (ux * back) as i32,
+        y1 - (uy * back) as i32,
+    );
+
     if st.head {
         head_tri(dc, st, (x0, y0), (x1, y1));
     }
     if st.tail {
         head_tri(dc, st, (x1, y1), (x0, y0));
     }
+}
+
+/// 箭头长度：跟着线宽走，但别小于 11px，否则看不见
+fn head_len(st: &Style) -> f32 {
+    (st.width as f32 * 4.2).max(11.0)
 }
 
 /// 一条线。虚线自己切段，每段都走 GDI+，边缘才平滑。
@@ -217,7 +250,7 @@ unsafe fn head_tri(dc: HDC, st: &Style, from: (i32, i32), to: (i32, i32)) {
         return;
     }
     let (ux, uy) = (dx / len, dy / len);
-    let size = (st.width as f32 * 4.2).max(11.0);
+    let size = head_len(st);
     let (px, py) = (-uy, ux);
     let bx = to.0 - (ux * size) as i32;
     let by = to.1 - (uy * size) as i32;
@@ -247,26 +280,27 @@ unsafe fn box_shape(dc: HDC, st: &Style, a: POINT, b: POINT, ox: i32, oy: i32) {
         return;
     }
 
-    let pen = CreatePen(PS_SOLID, st.width.max(1), st.color);
-    let brush = if st.filled {
-        CreateSolidBrush(st.color)
+    let full = crate::win::rect(l, t, r, btm);
+    let w = st.width.max(1) as f32;
+    // GDI+ 的画笔以路径中心线为准，往里收半个线宽，视觉外边界才和拖拽框一致
+    let half = (w * 0.5).round() as i32;
+    let stroke_r = if r - l > half * 2 + 1 && btm - t > half * 2 + 1 {
+        crate::win::rect(l + half, t + half, r - half, btm - half)
     } else {
-        GetStockObject(NULL_BRUSH)
+        full
     };
-    let old_p = SelectObject(dc, pen as HGDIOBJ);
-    let old_b = SelectObject(dc, brush as HGDIOBJ);
 
-    if st.round {
-        Ellipse(dc, l, t, r, btm);
-    } else {
-        Rectangle(dc, l, t, r, btm);
-    }
-
-    SelectObject(dc, old_p);
-    SelectObject(dc, old_b);
-    DeleteObject(pen as HGDIOBJ);
     if st.filled {
-        DeleteObject(brush as HGDIOBJ);
+        if st.round {
+            crate::gdiplus::fill_ellipse(dc, &full, st.color);
+        } else {
+            crate::gdiplus::rect_fill(dc, &full, st.color);
+        }
+    }
+    if st.round {
+        crate::gdiplus::ellipse(dc, &stroke_r, st.color, w);
+    } else {
+        crate::gdiplus::rect_stroke(dc, &stroke_r, st.color, w);
     }
 }
 

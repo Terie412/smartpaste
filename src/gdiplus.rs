@@ -83,6 +83,14 @@ extern "system" {
         count: i32,
         fill_mode: i32,
     ) -> i32;
+    fn GdipFillEllipse(
+        g: *mut core::ffi::c_void,
+        brush: *mut core::ffi::c_void,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> i32;
     fn GdipDrawEllipse(
         g: *mut core::ffi::c_void,
         pen: *mut core::ffi::c_void,
@@ -294,6 +302,25 @@ pub unsafe fn line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, colorref: u32, w
         GdipDrawLine(g, pen, x1 as f32, y1 as f32, x2 as f32, y2 as f32);
     });
     GdipDeletePen(pen);
+}
+
+/// 实心椭圆
+pub unsafe fn fill_ellipse(dc: HDC, r: &RECT, colorref: u32) {
+    let mut brush: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreateSolidFill(argb(colorref), &mut brush) != 0 {
+        return;
+    }
+    with_graphics(dc, |g| {
+        GdipFillEllipse(
+            g,
+            brush,
+            r.left as f32,
+            r.top as f32,
+            (r.right - r.left) as f32,
+            (r.bottom - r.top) as f32,
+        );
+    });
+    GdipDeleteBrush(brush);
 }
 
 pub unsafe fn ellipse(dc: HDC, r: &RECT, colorref: u32, width: f32) {
