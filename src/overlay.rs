@@ -1039,8 +1039,9 @@ impl Overlay {
                 None => blend(self.mask_dc, self.back_dc, 0, 0, w, h),
             }
 
-            // 预测区域：蒙层之上画一层淡色底 + 描边
-            if !self.locked {
+            // 预测区域：蒙层之上画一层淡色底 + 描边。
+            // 一旦按下鼠标（开始拖）就不再显示，但值保留着，单击还要用它。
+            if !self.locked && !self.dragging {
                 if let Some(r) = self.predict {
                     let pr = rect(
                         r.left - self.screen.x,
@@ -1629,8 +1630,8 @@ extern "system" fn overlay_wndproc(
                     return 0;
                 }
 
-                // 取色浮层跟着光标走，只有还没框选时才需要
-                if !ov.locked {
+                // 预测只在"还没按下鼠标"时更新：一旦开始拖，就不再跟着动了
+                if !ov.locked && !ov.dragging {
                     let before = ov.predict;
                     ov.refresh_predict(x, y);
                     let changed = match (before, ov.predict) {
@@ -1646,6 +1647,10 @@ extern "system" fn overlay_wndproc(
                     if changed {
                         InvalidateRect(hwnd, std::ptr::null(), 0);
                     }
+                }
+
+                // 取色浮层跟着光标走，只有还没框选时才需要
+                if !ov.locked {
                     let sx = x + ov.screen.x;
                     let sy = y + ov.screen.y;
                     if ov.cursor.x != sx || ov.cursor.y != sy {
@@ -2057,6 +2062,12 @@ pub fn start() -> bool {
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
         SetFocus(hwnd);
+        // 一打开就按当前光标位置算一次，不用先动鼠标才看得到预测
+        let mut cp: POINT = std::mem::zeroed();
+        GetCursorPos(&mut cp);
+        if let Some(ov) = OVERLAY.as_mut() {
+            ov.refresh_predict(cp.x - vx, cp.y - vy);
+        }
         crate::win::trace(&format!("overlay: started {vw}x{vh} at ({vx},{vy})"));
 
         if let Some((px, py, pw, ph)) = PRESET {
