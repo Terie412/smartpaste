@@ -23,6 +23,8 @@ pub struct Config {
     pub hotkey_vk: u32,
     /// 每个工具上次用过的样式，原样存字符串，解析交给 edit::Style
     pub styles: [Option<String>; 5],
+    /// 上次"另存为"选的目录，下次直接打开这里
+    pub save_dir: Option<String>,
 }
 
 impl Default for Config {
@@ -31,6 +33,7 @@ impl Default for Config {
             hotkey_mod: DEFAULT_MOD,
             hotkey_vk: DEFAULT_VK,
             styles: [None, None, None, None, None],
+            save_dir: None,
         }
     }
 }
@@ -71,6 +74,12 @@ impl Config {
                         }
                     }
                 }
+                "save_dir" => {
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        cfg.save_dir = Some(v.to_string());
+                    }
+                }
                 k if k.starts_with("style.") => {
                     if let Ok(i) = k["style.".len()..].parse::<usize>() {
                         if i < 5 {
@@ -96,6 +105,9 @@ impl Config {
             "; smartpaste 配置\nhotkey_mod={}\nhotkey_vk={}\n",
             self.hotkey_mod, self.hotkey_vk
         );
+        if let Some(d) = &self.save_dir {
+            text.push_str(&format!("save_dir={d}\n"));
+        }
         text.push_str("; 每个工具的样式：RRGGBB,线宽,标志位\n");
         for (i, s) in self.styles.iter().enumerate() {
             if let Some(v) = s {

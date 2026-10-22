@@ -780,12 +780,35 @@ impl Overlay {
                     _ => base,
                 }
             };
-            unsafe {
-                PENDING_IMAGE = Some(img);
-                PENDING_ORIGIN = POINT {
-                    x: self.screen.x + sel.left,
-                    y: self.screen.y + sel.top,
+            // 保存走"另存为"：每次都让用户决定存哪儿，只在成功后记住目录。
+            // 取消就停在遮罩里，选区还在，可以接着改或换个区域。
+            if cmd == CMD_SAVE {
+                let cfg = crate::config::Config::load();
+                let name = crate::savedlg::default_name();
+                let Some(path) = crate::savedlg::ask(self.hwnd, cfg.save_dir.as_deref(), &name)
+                else {
+                    crate::win::trace("save: 用户取消");
+                    return;
                 };
+                if img.save(&path).is_err() {
+                    crate::win::trace(&format!("save: 写入失败 {}", path.display()));
+                    return;
+                }
+                let mut cfg = cfg;
+                cfg.save_dir = path
+                    .parent()
+                    .map(|d| d.display().to_string())
+                    .filter(|d| !d.is_empty());
+                cfg.save();
+                crate::win::trace(&format!("saved {}", path.display()));
+            } else {
+                unsafe {
+                    PENDING_IMAGE = Some(img);
+                    PENDING_ORIGIN = POINT {
+                        x: self.screen.x + sel.left,
+                        y: self.screen.y + sel.top,
+                    };
+                }
             }
         }
         unsafe {

@@ -10,6 +10,7 @@ mod icon;
 mod icons;
 mod overlay;
 mod pin;
+mod savedlg;
 mod settings;
 mod win;
 
@@ -317,6 +318,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                         hotkey_mod: old_mod,
                         hotkey_vk: old_vk,
                         styles: cfg.styles.clone(),
+                        save_dir: cfg.save_dir.clone(),
                     }
                     .save();
                     win::trace(&format!(
@@ -325,6 +327,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                         config::Config {
                             hotkey_mod: old_mod,
                             styles: cfg.styles.clone(),
+                            save_dir: cfg.save_dir.clone(),
                             hotkey_vk: old_vk
                         }
                         .hotkey_text(),
@@ -374,10 +377,8 @@ fn handle_command(cmd: u32, img: Option<image::RgbaImage>, origin: POINT) {
             Ok(()) => win::trace("copy ok"),
             Err(e) => win::trace(&format!("copy failed: {e}")),
         },
-        CMD_SAVE => match save_png(&img) {
-            Some(p) => win::trace(&format!("saved {}", p.display())),
-            None => win::trace("save failed"),
-        },
+        // 保存已经在遮罩里做完（另存为对话框），这里不用再处理
+        CMD_SAVE => {}
         CMD_PIN => {
             win::trace(if pin::create(&img, origin.x, origin.y) {
                 "pin created"
