@@ -37,7 +37,7 @@ impl Default for Style {
     fn default() -> Self {
         Self {
             color: 0x0063_2EFF, // #FF2E63 的 COLORREF 写法
-            width: 3,
+            width: 4,
             dashed: false,
             filled: false,
             head: true,

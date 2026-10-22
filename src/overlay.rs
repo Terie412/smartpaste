@@ -82,6 +82,8 @@ const fn ui(v: i32) -> i32 {
 
 // 圆角直径（GDI+ 里再除以 2 得到半径）
 const RADIUS_BAR: i32 = ui(16);
+/// 选中态底色。不用描边——深色边框在白色工具条上太跳，加深底色就够了。
+const SEL_BG: u32 = 0x00EB_E3E3; // #E3E3EB
 const RADIUS_CHIP: i32 = ui(12);
 
 // 正方形按钮：宽高一致，比原来的横向长条紧凑
@@ -1003,16 +1005,18 @@ unsafe fn draw_bar(
             _ => false,
         };
         if selected {
-            // 选中：比悬停块大一圈，再加 2px 深色边框，
-            // 光靠浅灰底在白工具栏上看不出来
-            let r = rect(
-                b.rect.left + ui(2),
-                b.rect.top + ui(2),
-                b.rect.right - ui(2),
-                b.rect.bottom - ui(2),
+            // 选中：只加深底色，不描边。深色描边在白工具栏上太抢眼。
+            round_fill(
+                dc,
+                &rect(
+                    b.rect.left + ui(2),
+                    b.rect.top + ui(3),
+                    b.rect.right - ui(2),
+                    b.rect.bottom - ui(3),
+                ),
+                RADIUS_CHIP,
+                SEL_BG,
             );
-            round_fill(dc, &r, RADIUS_CHIP, rgb(0xED, 0xED, 0xF2));
-            round_stroke_w(dc, &r, RADIUS_CHIP, rgb(0x2E, 0x2E, 0x36), ui(2));
         } else if hover == idx || pressed == idx {
             round_fill(
                 dc,
@@ -1071,7 +1075,26 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
             continue;
         }
 
-        if hover_prop == i as i32 {
+        // 选中态：加深底色（悬停盖在它上面时仍保留选中的深浅差别）
+        let selected = match *prop {
+            Prop::Color(idx) => style.color == COLORS[idx],
+            Prop::Width(idx) => style.width == tool.width_at(idx),
+            Prop::Round(is_round) => style.round == is_round,
+            _ => false,
+        };
+        if selected {
+            round_fill(
+                dc,
+                &rect(
+                    r.left + ui(2),
+                    r.top + ui(3),
+                    r.right - ui(2),
+                    r.bottom - ui(3),
+                ),
+                RADIUS_CHIP,
+                SEL_BG,
+            );
+        } else if hover_prop == i as i32 {
             round_fill(
                 dc,
                 &rect(
@@ -1087,24 +1110,9 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
 
         match *prop {
             Prop::Color(idx) => {
-                let sel = style.color == COLORS[idx];
                 let d = rect(cx - ui(7), cy - ui(7), cx + ui(7), cy + ui(7));
                 round_fill(dc, &d, 8, COLORS[idx]);
-                if sel {
-                    round_stroke(
-                        dc,
-                        &rect(
-                            d.left - ui(2),
-                            d.top - ui(2),
-                            d.right + ui(2),
-                            d.bottom + ui(2),
-                        ),
-                        RADIUS_CHIP,
-                        rgb(0x2A, 0x2A, 0x30),
-                    );
-                } else {
-                    round_stroke(dc, &d, 8, rgb(0xD8, 0xD8, 0xDE));
-                }
+                round_stroke(dc, &d, 8, rgb(0xD8, 0xD8, 0xDE));
             }
             Prop::Width(idx) => {
                 let sel = style.width == tool.width_at(idx);
@@ -1132,15 +1140,7 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
                     SelectObject(dc, old);
                     DeleteObject(pen as HGDIOBJ);
                 }
-                if sel {
-                    round_stroke_w(
-                        dc,
-                        &rect(cx - ui(9), cy - ui(9), cx + ui(9), cy + ui(9)),
-                        RADIUS_CHIP,
-                        rgb(0x2E, 0x2E, 0x36),
-                        2,
-                    );
-                }
+                let _ = sel;
             }
             Prop::Filled => {
                 let b = rect(cx - ui(6), cy - ui(6), cx + ui(6), cy + ui(6));
@@ -1212,15 +1212,7 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
                 } else {
                     crate::gdiplus::rect_stroke(dc, &frame, col, ui(2) as f32);
                 }
-                if sel {
-                    round_stroke_w(
-                        dc,
-                        &rect(cx - ui(10), cy - ui(10), cx + ui(10), cy + ui(10)),
-                        RADIUS_CHIP,
-                        rgb(0x2E, 0x2E, 0x36),
-                        ui(2),
-                    );
-                }
+                let _ = sel;
             }
             Prop::Sep => {}
         }
