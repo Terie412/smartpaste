@@ -11,10 +11,13 @@ mod icons;
 mod overlay;
 mod pin;
 mod settings;
+mod uia;
 mod win;
 
 use std::path::PathBuf;
-use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM, ERROR_ALREADY_EXISTS};
+use windows_sys::Win32::Foundation::{
+    GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM,
+};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT,
@@ -25,10 +28,9 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, MessageBoxW, PostQuitMessage,
-    RegisterClassW,
-    SetForegroundWindow, TrackPopupMenu, TranslateMessage, HICON, HWND_MESSAGE, MF_STRING, MSG,
-    MB_ICONWARNING, MB_OK, SM_CXSMICON, TPM_RIGHTBUTTON, WM_APP, WM_COMMAND, WM_DESTROY,
-    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    RegisterClassW, SetForegroundWindow, TrackPopupMenu, TranslateMessage, HICON, HWND_MESSAGE,
+    MB_ICONWARNING, MB_OK, MF_STRING, MSG, SM_CXSMICON, TPM_RIGHTBUTTON, WM_APP, WM_COMMAND,
+    WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
 };
 
 use overlay::{CMD_CANCEL, CMD_COPY, CMD_PIN, CMD_SAVE, WM_SNAP_DONE};
@@ -335,10 +337,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                     );
                 } else {
                     ACTIVE_HOTKEY = (cfg.hotkey_mod, cfg.hotkey_vk);
-                    win::trace(&format!(
-                        "hotkey re-registered: {} ok=1",
-                        cfg.hotkey_text()
-                    ));
+                    win::trace(&format!("hotkey re-registered: {} ok=1", cfg.hotkey_text()));
                 }
                 0
             }
