@@ -6,8 +6,9 @@
 use crate::gdiplus::FontSpec;
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DeleteObject, Ellipse, GetStockObject, LineTo, MoveToEx, Polygon,
-    Polyline, Rectangle, SelectObject, HDC, HGDIOBJ, NULL_BRUSH, NULL_PEN, PS_SOLID,
+    BeginPath, CreatePen, CreateSolidBrush, DeleteObject, Ellipse, EndPath, GetStockObject, LineTo,
+    MoveToEx, Polygon, Polyline, Rectangle, SelectObject, SetBkMode, SetTextColor, StrokePath,
+    TextOutW, HDC, HGDIOBJ, NULL_BRUSH, NULL_PEN, PS_SOLID, TRANSPARENT,
 };
 
 /// 描边样式。颜色是 COLORREF（0x00BBGGRR）。
@@ -70,6 +71,8 @@ pub enum Kind {
     Text {
         at: POINT,
         text: String,
+        /// 输入时 EDIT 用的行高（GDI 的 tmHeight）。0 表示按字号估算。
+        line_h: i32,
     },
 }
 
@@ -124,7 +127,9 @@ pub fn draw(dc: HDC, s: &Shape, ox: i32, oy: i32) {
         Kind::Box { a, b } => unsafe { box_shape(dc, &s.style, *a, *b, ox, oy) },
         Kind::Pen { pts } => unsafe { pen_stroke(dc, &s.style, pts, ox, oy) },
         Kind::Eraser { .. } => {} // 由 overlay 特判
-        Kind::Text { at, text } => unsafe { label(dc, &s.style, *at, text, ox, oy) },
+        Kind::Text { at, text, line_h } => unsafe {
+            label(dc, &s.style, *at, text, *line_h, ox, oy)
+        },
     }
 }
 
@@ -277,31 +282,60 @@ unsafe fn pen_stroke(dc: HDC, st: &Style, pts: &[POINT], ox: i32, oy: i32) {
 /// 文本：先投影，再描边，最后填字。
 ///
 /// 三层顺序不能反——描边是沿字形轮廓勾的，压在里面会被填充盖掉一半。
-unsafe fn label(dc: HDC, st: &Style, at: POINT, text: &str, ox: i32, oy: i32) {
+unsafe fn label(dc: HDC, st: &Style, at: POINT, text: &str, line_h: i32, ox: i32, oy: i32) {
     if text.is_empty() {
         return;
     }
     // 文本工具把字号存在 width 里（属性条的 Width 档位就是字号）
     let px = st.width.max(8);
     let spec = FontSpec::new(px as f32, st.bold, "Microsoft YaHei");
-    let (x, y) = (at.x + ox, at.y + oy);
+    // GDI+ 的 DrawString 在布局矩形里自带约 1/6 em 的左内边距，
+    // 而输入框的 EDIT 是从边距处起笔的。不补掉这个差值，提交瞬间整段字会右移。
+    // GDI 绘制时，文字原点和 EDIT 内部缩进对齐即可（实测 2px）
+    let pad_x = 2;
+    let pad_y = 3;
+    let x = at.x + ox - pad_x;
+    let lh = if line_h > 0 {
+        line_h
+    } else {
+        (px as f32 * 1.35) as i32
+    };
 
-    if st.shadow {
-        // 偏移一点点，带透明度，像压在纸上的影子
-        crate::gdiplus::draw_text_argb(dc, &spec, 0x6600_0000, x + 2, y + 2, text);
+    // 逐行画：行距必须用输入时 EDIT 的 tmHeight，否则多行会越写越偏
+    for (i, line) in text.split('\n').enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let y = at.y + oy + i as i32 * lh - pad_y;
+        if st.shadow {
+            crate::gdiplus::draw_text_argb(dc, &spec, 0x6600_0000, x + 2, y + 2, line);
+        }
+        let font = crate::win::ui_font_w(px, if st.bold { 700 } else { 400 });
+        let old_f = SelectObject(dc, font as HGDIOBJ);
+        let wide: Vec<u16> = line.encode_utf16().collect();
+        SetBkMode(dc, TRANSPARENT as i32);
+
+        if st.stroke {
+            // 描边也走 GDI：把同一份字形轮廓转成路径再勾边，
+            // 和下面的填充共用一套 glyph，不会出现描边和字心错半个像素。
+            let w = (px as f32 / 9.0).max(2.0) as i32;
+            let pen = CreatePen(PS_SOLID, w, contrast_color(st.color));
+            let old_p = SelectObject(dc, pen as HGDIOBJ);
+            let old_b = SelectObject(dc, GetStockObject(NULL_BRUSH) as HGDIOBJ);
+            BeginPath(dc);
+            TextOutW(dc, x, y, wide.as_ptr(), wide.len() as i32);
+            EndPath(dc);
+            StrokePath(dc);
+            SelectObject(dc, old_p);
+            SelectObject(dc, old_b);
+            DeleteObject(pen as HGDIOBJ);
+        }
+
+        SetTextColor(dc, st.color);
+        TextOutW(dc, x, y, wide.as_ptr(), wide.len() as i32);
+        SelectObject(dc, old_f);
+        DeleteObject(font as HGDIOBJ);
     }
-    if st.stroke {
-        crate::gdiplus::text_stroke(
-            dc,
-            &spec,
-            contrast_color(st.color),
-            x,
-            y,
-            text,
-            (px as f32 / 9.0).max(2.0),
-        );
-    }
-    crate::gdiplus::draw_text(dc, &spec, st.color, x, y, text);
 }
 
 /// 描边取反差色：深字配白边，浅字配黑边

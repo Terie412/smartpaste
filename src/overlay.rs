@@ -17,17 +17,17 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM}
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject,
-    GetTextExtentPoint32W, IntersectClipRect, InvalidateRect, Rectangle, ReleaseDC, RestoreDC,
-    SaveDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, TextOutW, UpdateWindow, AC_SRC_OVER,
-    BLENDFUNCTION, HBRUSH, HDC, HFONT, HGDIOBJ, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY,
-    TRANSPARENT,
+    GetTextExtentPoint32W, GetTextMetricsW, IntersectClipRect, InvalidateRect, Rectangle,
+    ReleaseDC, RestoreDC, SaveDC, SelectObject, SetBkMode, SetTextColor, TextOutW, UpdateWindow,
+    AC_SRC_OVER, BLENDFUNCTION, HDC, HFONT, HGDIOBJ, HOLLOW_BRUSH, NULL_BRUSH, PAINTSTRUCT,
+    PS_SOLID, SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_C, VK_CONTROL,
     VK_ESCAPE, VK_RETURN, VK_S, VK_SHIFT, VK_Z,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowRect,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, PostMessageW, RegisterClassW, SendMessageW,
     SetForegroundWindow, SetWindowPos, ShowWindow, EC_LEFTMARGIN, EC_RIGHTMARGIN, EN_CHANGE,
     ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
@@ -277,8 +277,6 @@ pub struct Overlay {
     /// 文字锚点，相对选区左上角
     text_at: POINT,
     edit_font: HFONT,
-    edit_bg: HBRUSH,
-    edit_bg_color: u32,
     icons: IconSet,
     back_dc: HDC,
     back_bmp: windows_sys::Win32::Graphics::Gdi::HBITMAP,
@@ -367,15 +365,32 @@ unsafe extern "system" fn text_edit_proc(
             return 0;
         }
     }
-    DefSubclassProc(hwnd, msg, wparam, lparam)
-}
+    // 输入框要"透明"：擦背景时把 back buffer 里对应的那块拷进来。
+    // 这样 EDIT 仍是正常可见窗口（输入法才能算对候选窗位置），
+    // 屏幕上看到的却是截图本身，不是白块。
+    if msg == 0x0014 {
+        if let Some(ov) = OVERLAY.as_ref() {
+            let hdc = wparam as HDC;
+            let mut cr: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut cr);
+            let mut wr: RECT = std::mem::zeroed();
+            GetWindowRect(hwnd, &mut wr);
+            BitBlt(
+                hdc,
+                0,
+                0,
+                cr.right,
+                cr.bottom,
+                ov.back_dc,
+                wr.left - ov.screen.x,
+                wr.top - ov.screen.y,
+                SRCCOPY,
+            );
+        }
+        return 1;
+    }
 
-/// 颜色是不是浅色。决定输入框底色要不要反着来。
-fn is_light(c: u32) -> bool {
-    let r = (c & 0xFF) as f32;
-    let g = ((c >> 8) & 0xFF) as f32;
-    let b = ((c >> 16) & 0xFF) as f32;
-    0.299 * r + 0.587 * g + 0.114 * b > 150.0
+    DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
@@ -564,19 +579,11 @@ impl Overlay {
 
         let st = self.styles[Tool::Text.idx()];
         let px = st.width.max(10);
-        // 背景跟着字色反着来，否则白字打在白底上什么都看不见
-        let light = is_light(st.color);
-        let bg = if light {
-            rgb(0x1E, 0x1E, 0x24)
-        } else {
-            rgb(0xFF, 0xFF, 0xFF)
-        };
-        self.edit_bg_color = bg;
         self.edit_font = ui_font_w(px, if st.bold { 700 } else { 400 });
-        self.edit_bg = CreateSolidBrush(bg);
 
         let lh = (px as f32 * 1.4) as i32;
-        let pad = ui(3);
+        // EDIT 有个 1~2px 的内部缩进，往左上让一点，让它的首字落在点击处
+        let pad = 2;
         let edit = CreateWindowExW(
             0,
             to_wide("EDIT").as_ptr(),
@@ -602,7 +609,7 @@ impl Overlay {
         }
 
         SendMessageW(edit, WM_SETFONT, self.edit_font as WPARAM, 1);
-        let margins = ((pad as u32) & 0xFFFF) | (((pad as u32) & 0xFFFF) << 16);
+        let margins = 0u32;
         SendMessageW(
             edit,
             EM_SETMARGINS,
@@ -631,6 +638,18 @@ impl Overlay {
         let mut buf = vec![0u16; len as usize + 1];
         GetWindowTextW(edit, buf.as_mut_ptr(), len + 1);
         let raw = String::from_utf16_lossy(&buf[..len as usize]);
+
+        // 记下 EDIT 实际用的行高，提交后逐行绘制要用它，否则多行会越写越偏
+        let mut tm: TEXTMETRICW = std::mem::zeroed();
+        let mut line_h = 0;
+        let dc = GetDC(edit);
+        if !dc.is_null() {
+            let old = SelectObject(dc, self.edit_font as HGDIOBJ);
+            GetTextMetricsW(dc, &mut tm);
+            SelectObject(dc, old);
+            ReleaseDC(edit, dc);
+            line_h = tm.tmHeight;
+        }
         self.destroy_edit();
 
         // EDIT 内部用单个 \r 当换行，GDI+ 只认 \n。
@@ -642,6 +661,7 @@ impl Overlay {
                 kind: Kind::Text {
                     at: self.text_at,
                     text: text.clone(),
+                    line_h,
                 },
                 style: self.styles[Tool::Text.idx()],
             });
@@ -675,10 +695,6 @@ impl Overlay {
         if !self.edit_font.is_null() {
             delete_font(self.edit_font);
             self.edit_font = std::ptr::null_mut();
-        }
-        if !self.edit_bg.is_null() {
-            DeleteObject(self.edit_bg as HGDIOBJ);
-            self.edit_bg = std::ptr::null_mut();
         }
     }
 
@@ -1541,12 +1557,14 @@ extern "system" fn overlay_wndproc(
                 0
             }
             // 输入框的配色：字色跟着当前设置走，底色反着来
+            // 输入框的背景由子类的 WM_ERASEBKGND 从 back buffer 拷过来，
+            // 这里只把字色给它、背景刷成空心，看起来就是"透明"的
             WM_CTLCOLOREDIT => {
                 let hdc = wparam as HDC;
                 let st = ov.styles[Tool::Text.idx()];
                 SetTextColor(hdc, st.color);
-                SetBkColor(hdc, ov.edit_bg_color);
-                ov.edit_bg as LRESULT
+                SetBkMode(hdc, TRANSPARENT as i32);
+                GetStockObject(HOLLOW_BRUSH) as LRESULT
             }
             // 换行后把输入框撑高
             WM_COMMAND => {
@@ -1676,8 +1694,6 @@ pub fn start() -> bool {
             text_edit: std::ptr::null_mut(),
             text_at: POINT { x: 0, y: 0 },
             edit_font: std::ptr::null_mut(),
-            edit_bg: std::ptr::null_mut(),
-            edit_bg_color: rgb(0xFF, 0xFF, 0xFF),
             icons: crate::icons::load(),
             back_dc,
             back_bmp,
