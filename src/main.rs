@@ -316,6 +316,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                     config::Config {
                         hotkey_mod: old_mod,
                         hotkey_vk: old_vk,
+                        styles: cfg.styles.clone(),
                     }
                     .save();
                     win::trace(&format!(
@@ -323,6 +324,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                         cfg.hotkey_text(),
                         config::Config {
                             hotkey_mod: old_mod,
+                            styles: cfg.styles.clone(),
                             hotkey_vk: old_vk
                         }
                         .hotkey_text(),

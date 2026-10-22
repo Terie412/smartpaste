@@ -1941,6 +1941,19 @@ fn apply_prop(ov: &mut Overlay, idx: i32) {
         Prop::Shadow => st.shadow = !st.shadow,
         Prop::Sep => {}
     }
+    save_styles(ov);
+}
+
+/// 把五个工具当前的样式写回配置。只改了某一条也要整组存，
+/// 这样配置文件里始终是完整的一份。
+fn save_styles(ov: &Overlay) {
+    let mut cfg = crate::config::Config::load();
+    for i in 0..5 {
+        cfg.styles[i] = Some(ov.styles[i].to_token());
+    }
+    if !cfg.save() {
+        crate::win::trace("config: 样式保存失败");
+    }
 }
 
 pub fn register() {
@@ -2070,6 +2083,15 @@ pub fn start() -> bool {
 
         if let Some(ov) = OVERLAY.as_mut() {
             ov.hwnd = hwnd;
+            // 每个工具上次用的颜色/线宽，恢复回来
+            let cfg = crate::config::Config::load();
+            for i in 0..5 {
+                if let Some(tok) = &cfg.styles[i] {
+                    if let Some(st) = crate::edit::Style::from_token(tok) {
+                        ov.styles[i] = st;
+                    }
+                }
+            }
         }
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);

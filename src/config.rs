@@ -17,10 +17,12 @@ pub const MOD_WIN: u32 = 8;
 pub const DEFAULT_MOD: u32 = MOD_CONTROL | MOD_SHIFT;
 pub const DEFAULT_VK: u32 = 0x41; // 'A'
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Config {
     pub hotkey_mod: u32,
     pub hotkey_vk: u32,
+    /// 每个工具上次用过的样式，原样存字符串，解析交给 edit::Style
+    pub styles: [Option<String>; 5],
 }
 
 impl Default for Config {
@@ -28,6 +30,7 @@ impl Default for Config {
         Self {
             hotkey_mod: DEFAULT_MOD,
             hotkey_vk: DEFAULT_VK,
+            styles: [None, None, None, None, None],
         }
     }
 }
@@ -68,6 +71,13 @@ impl Config {
                         }
                     }
                 }
+                k if k.starts_with("style.") => {
+                    if let Ok(i) = k["style.".len()..].parse::<usize>() {
+                        if i < 5 {
+                            cfg.styles[i] = Some(v.trim().to_string());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -81,14 +91,21 @@ impl Config {
                 return false;
             }
         }
-        let text = format!(
+        // style.0..4 对应 形状 / 箭头 / 画笔 / 文本 / 橡皮
+        let mut text = format!(
             "; smartpaste 配置\nhotkey_mod={}\nhotkey_vk={}\n",
             self.hotkey_mod, self.hotkey_vk
         );
+        text.push_str("; 每个工具的样式：RRGGBB,线宽,标志位\n");
+        for (i, s) in self.styles.iter().enumerate() {
+            if let Some(v) = s {
+                text.push_str(&format!("style.{i}={v}\n"));
+            }
+        }
         std::fs::write(&p, text).is_ok()
     }
 
-    pub fn hotkey_text(self) -> String {
+    pub fn hotkey_text(&self) -> String {
         hotkey_text(self.hotkey_mod, self.hotkey_vk)
     }
 }

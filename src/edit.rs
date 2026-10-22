@@ -33,6 +33,72 @@ pub struct Style {
     pub shadow: bool,
 }
 
+impl Style {
+    /// 存成一行：`RRGGBB,线宽,标志位`。
+    ///
+    /// 标志位按位拼：1 虚线、2 填充、4 起点箭头、8 终点箭头、
+    /// 16 圆角、32 加粗、64 描边、128 投影。
+    /// 用逗号分隔的短串，配置文件里一眼能看懂，也能手改。
+    pub fn to_token(&self) -> String {
+        let (r, g, b) = (
+            self.color & 0xFF,
+            (self.color >> 8) & 0xFF,
+            (self.color >> 16) & 0xFF,
+        );
+        let mut flags = 0u32;
+        if self.dashed {
+            flags |= 1;
+        }
+        if self.filled {
+            flags |= 2;
+        }
+        if self.head {
+            flags |= 4;
+        }
+        if self.tail {
+            flags |= 8;
+        }
+        if self.round {
+            flags |= 16;
+        }
+        if self.bold {
+            flags |= 32;
+        }
+        if self.stroke {
+            flags |= 64;
+        }
+        if self.shadow {
+            flags |= 128;
+        }
+        format!("{r:02X}{g:02X}{b:02X},{},{}", self.width, flags)
+    }
+
+    pub fn from_token(s: &str) -> Option<Style> {
+        let mut it = s.split(',');
+        let hex = it.next()?.trim();
+        let width: i32 = it.next()?.trim().parse().ok()?;
+        let flags: u32 = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
+        if hex.len() != 6 {
+            return None;
+        }
+        let r = u32::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u32::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u32::from_str_radix(&hex[4..6], 16).ok()?;
+        Some(Style {
+            color: r | (g << 8) | (b << 16),
+            width: width.clamp(1, 200),
+            dashed: flags & 1 != 0,
+            filled: flags & 2 != 0,
+            head: flags & 4 != 0,
+            tail: flags & 8 != 0,
+            round: flags & 16 != 0,
+            bold: flags & 32 != 0,
+            stroke: flags & 64 != 0,
+            shadow: flags & 128 != 0,
+        })
+    }
+}
+
 impl Default for Style {
     fn default() -> Self {
         Self {
