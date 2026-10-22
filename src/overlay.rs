@@ -98,6 +98,8 @@ const GAP: i32 = ui(8);
 /// 属性格是正方形（36×36）。12 格正好和 8 个工具按钮等宽（432），两条边能对齐。
 const PROP_W: i32 = 36;
 const PROP_H: i32 = 36;
+/// 分组竖线占的窄格
+const SEP_W: i32 = ui(5);
 
 /// 预设色（COLORREF：0x00BBGGRR）
 const COLORS: [u32; 6] = [
@@ -142,61 +144,75 @@ impl Tool {
         ];
         const WIDTHS_3: [Prop; 3] = [Prop::Width(0), Prop::Width(1), Prop::Width(2)];
 
-        static SHAPE: [Prop; 12] = [
+        static SHAPE: [Prop; 15] = [
+            // 形状 | 颜色 | 填充 | 粗细
             Prop::Round(false),
             Prop::Round(true),
+            Prop::Sep,
             Prop::Color(0),
             Prop::Color(1),
             Prop::Color(2),
             Prop::Color(3),
             Prop::Color(4),
             Prop::Color(5),
+            Prop::Sep,
             Prop::Filled,
+            Prop::Sep,
             Prop::Width(0),
             Prop::Width(1),
             Prop::Width(2),
         ];
-        static ARROW: [Prop; 10] = [
+        static ARROW: [Prop; 12] = [
+            // 颜色 | 线型 | 粗细
             Prop::Color(0),
             Prop::Color(1),
             Prop::Color(2),
             Prop::Color(3),
             Prop::Color(4),
             Prop::Color(5),
+            Prop::Sep,
             Prop::Dashed,
+            Prop::Sep,
             Prop::Width(0),
             Prop::Width(1),
             Prop::Width(2),
         ];
-        static PEN: [Prop; 9] = [
+        static PEN: [Prop; 10] = [
+            // 颜色 | 粗细
             Prop::Color(0),
             Prop::Color(1),
             Prop::Color(2),
             Prop::Color(3),
             Prop::Color(4),
             Prop::Color(5),
+            Prop::Sep,
             Prop::Width(0),
             Prop::Width(1),
             Prop::Width(2),
         ];
-        static TEXT: [Prop; 12] = [
+        static TEXT: [Prop; 14] = [
+            // 颜色 | 字号 | 字效
             Prop::Color(0),
             Prop::Color(1),
             Prop::Color(2),
             Prop::Color(3),
             Prop::Color(4),
             Prop::Color(5),
+            Prop::Sep,
             Prop::Width(0),
             Prop::Width(1),
             Prop::Width(2),
+            Prop::Sep,
             Prop::Bold,
             Prop::Stroke,
             Prop::Shadow,
         ];
-        static ERASER: [Prop; 5] = [
+        static ERASER: [Prop; 6] = [
+            // 粗细 | 形状
             Prop::Width(0),
             Prop::Width(1),
             Prop::Width(2),
+            Prop::Sep,
             Prop::Round(false),
             Prop::Round(true),
         ];
@@ -470,7 +486,10 @@ impl Overlay {
             return;
         };
         let list = tool.props();
-        let pw = list.len() as i32 * PROP_W;
+        let pw: i32 = list
+            .iter()
+            .map(|p| if *p == Prop::Sep { SEP_W } else { PROP_W })
+            .sum();
         let mut px = sel.right - pw;
         if px < 0 {
             px = 0;
@@ -491,9 +510,9 @@ impl Overlay {
             py = bar_y - PROP_H - GAP;
         }
         for prop in list {
-            self.props
-                .push((rect(px, py, px + PROP_W, py + PROP_H), *prop));
-            px += PROP_W;
+            let w = if *prop == Prop::Sep { SEP_W } else { PROP_W };
+            self.props.push((rect(px, py, px + w, py + PROP_H), *prop));
+            px += w;
         }
         crate::win::trace(&format!(
             "layout: {} buttons, {} props, tool={:?}, bar=({},{}), props_y={}",
@@ -1072,7 +1091,7 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
 
         if *prop == Prop::Sep {
             let b = CreateSolidBrush(rgb(0xD8, 0xD8, 0xDE));
-            let sep = rect(cx, r.top + ui(10), cx + 1, r.bottom - ui(10));
+            let sep = rect(cx, r.top + ui(6), cx + 1, r.bottom - ui(6));
             FillRect(dc, &sep, b);
             DeleteObject(b as HGDIOBJ);
             continue;
@@ -1143,26 +1162,24 @@ unsafe fn draw_props(dc: HDC, props: &[(RECT, Prop)], hover_prop: i32, style: &S
                 let _ = sel;
             }
             Prop::Filled => {
+                // 圆角要小：RADIUS_CHIP 在 20px 的框上会变成圆，和"圆角"图标撞车
                 let b = rect(cx - ui(6), cy - ui(6), cx + ui(6), cy + ui(6));
                 if style.filled {
-                    round_fill(dc, &b, RADIUS_CHIP, rgb(ON.0, ON.1, ON.2));
+                    round_fill(dc, &b, 4, rgb(ON.0, ON.1, ON.2));
                 } else {
-                    round_stroke(dc, &b, RADIUS_CHIP, rgb(OFF.0, OFF.1, OFF.2));
+                    round_stroke(dc, &b, 4, rgb(OFF.0, OFF.1, OFF.2));
                 }
             }
             Prop::Dashed => {
                 let c = if style.dashed { ON } else { OFF };
                 let pen = CreatePen(PS_SOLID, ui(2), rgb(c.0, c.1, c.2));
                 let old = SelectObject(dc, pen as HGDIOBJ);
-                if style.dashed {
-                    for k in 0..3 {
-                        let x0 = cx - ui(7) + k * ui(5);
-                        MoveToEx(dc, x0, cy, std::ptr::null_mut());
-                        LineTo(dc, x0 + ui(3), cy);
-                    }
-                } else {
-                    MoveToEx(dc, cx - 9, cy, std::ptr::null_mut());
-                    LineTo(dc, cx + 9, cy);
+                // 始终画成虚线：关闭时只是变灰。原来关闭态画实线，
+                // 和旁边三根粗细线长得一样，分不清是哪个控件。
+                for k in 0..3 {
+                    let x0 = cx - ui(7) + k * ui(5);
+                    MoveToEx(dc, x0, cy, std::ptr::null_mut());
+                    LineTo(dc, x0 + ui(3), cy);
                 }
                 SelectObject(dc, old);
                 DeleteObject(pen as HGDIOBJ);
