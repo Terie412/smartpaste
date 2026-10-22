@@ -6,9 +6,9 @@
 use crate::gdiplus::FontSpec;
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPath, CreatePen, CreateSolidBrush, DeleteObject, Ellipse, EndPath, GetStockObject, LineTo,
-    MoveToEx, Polygon, Polyline, Rectangle, SelectObject, SetBkMode, SetTextColor, StrokePath,
-    TextOutW, HDC, HGDIOBJ, NULL_BRUSH, NULL_PEN, PS_SOLID, TRANSPARENT,
+    BeginPath, CreatePen, CreateSolidBrush, DeleteObject, Ellipse, EndPath, GetStockObject,
+    Polyline, Rectangle, SelectObject, SetBkMode, SetTextColor, StrokePath, TextOutW, HDC, HGDIOBJ,
+    NULL_BRUSH, NULL_PEN, PS_SOLID, TRANSPARENT,
 };
 
 /// 描边样式。颜色是 COLORREF（0x00BBGGRR）。
@@ -166,7 +166,8 @@ pub fn draw(dc: HDC, s: &Shape, ox: i32, oy: i32) {
 unsafe fn arrow(dc: HDC, st: &Style, a: POINT, b: POINT, ox: i32, oy: i32) {
     let (x0, y0) = (a.x + ox, a.y + oy);
     let (x1, y1) = (b.x + ox, b.y + oy);
-    stroke(dc, st, x0, y0, x1, y1);
+    // 一律走 GDI+：GDI 的直线没有抗锯齿，斜线全是台阶
+    stroke_aa(dc, st, x0, y0, x1, y1);
     if st.head {
         head_tri(dc, st, (x0, y0), (x1, y1));
     }
@@ -175,11 +176,9 @@ unsafe fn arrow(dc: HDC, st: &Style, a: POINT, b: POINT, ox: i32, oy: i32) {
     }
 }
 
-/// 一条线：实线走 GDI，虚线自己切段（GDI 的 PS_DASH 只对 1px 有效）。
-unsafe fn stroke(dc: HDC, st: &Style, x0: i32, y0: i32, x1: i32, y1: i32) {
-    let w = st.width.max(1);
-    let pen = CreatePen(PS_SOLID, w, st.color);
-    let old = SelectObject(dc, pen as HGDIOBJ);
+/// 一条线。虚线自己切段，每段都走 GDI+，边缘才平滑。
+unsafe fn stroke_aa(dc: HDC, st: &Style, x0: i32, y0: i32, x1: i32, y1: i32) {
+    let w = st.width.max(1) as f32;
 
     if st.dashed {
         let dx = (x1 - x0) as f32;
@@ -187,28 +186,26 @@ unsafe fn stroke(dc: HDC, st: &Style, x0: i32, y0: i32, x1: i32, y1: i32) {
         let len = (dx * dx + dy * dy).sqrt();
         if len >= 1.0 {
             let (ux, uy) = (dx / len, dy / len);
-            let dash = (w as f32 * 4.0).max(6.0);
-            let gap = (w as f32 * 3.0).max(4.0);
+            let dash = (w * 4.0).max(6.0);
+            let gap = (w * 3.0).max(4.0);
             let mut pos = 0.0f32;
             while pos < len {
                 let end = (pos + dash).min(len);
-                MoveToEx(
+                crate::gdiplus::line(
                     dc,
-                    x0 + (ux * pos) as i32,
-                    y0 + (uy * pos) as i32,
-                    std::ptr::null_mut(),
+                    (x0 as f32 + ux * pos) as i32,
+                    (y0 as f32 + uy * pos) as i32,
+                    (x0 as f32 + ux * end) as i32,
+                    (y0 as f32 + uy * end) as i32,
+                    st.color,
+                    w,
                 );
-                LineTo(dc, x0 + (ux * end) as i32, y0 + (uy * end) as i32);
                 pos = end + gap;
             }
         }
     } else {
-        MoveToEx(dc, x0, y0, std::ptr::null_mut());
-        LineTo(dc, x1, y1);
+        crate::gdiplus::line(dc, x0, y0, x1, y1, st.color, w);
     }
-
-    SelectObject(dc, old);
-    DeleteObject(pen as HGDIOBJ);
 }
 
 /// 箭头尖：实心三角，大小跟着线宽走
@@ -238,13 +235,7 @@ unsafe fn head_tri(dc: HDC, st: &Style, from: (i32, i32), to: (i32, i32)) {
         },
     ];
 
-    let brush = CreateSolidBrush(st.color);
-    let old_b = SelectObject(dc, brush as HGDIOBJ);
-    let old_p = SelectObject(dc, GetStockObject(NULL_PEN) as HGDIOBJ);
-    Polygon(dc, pts.as_ptr(), 3);
-    SelectObject(dc, old_b);
-    SelectObject(dc, old_p);
-    DeleteObject(brush as HGDIOBJ);
+    crate::gdiplus::fill_polygon(dc, &pts, st.color);
 }
 
 unsafe fn box_shape(dc: HDC, st: &Style, a: POINT, b: POINT, ox: i32, oy: i32) {

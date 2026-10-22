@@ -7,7 +7,7 @@
 //! windows-sys 0.59 只提供了 GDI+ 的类型定义、没有函数绑定，
 //! 所以这里自己声明 extern —— GDI+ 是扁平的 C API，符号名没有修饰。
 
-use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::Foundation::{POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::HDC;
 
 #[repr(C)]
@@ -75,6 +75,13 @@ extern "system" {
         y1: f32,
         x2: f32,
         y2: f32,
+    ) -> i32;
+    fn GdipFillPolygonI(
+        g: *mut core::ffi::c_void,
+        brush: *mut core::ffi::c_void,
+        pts: *const POINT,
+        count: i32,
+        fill_mode: i32,
     ) -> i32;
     fn GdipDrawEllipse(
         g: *mut core::ffi::c_void,
@@ -261,6 +268,21 @@ pub unsafe fn stroke_round(dc: HDC, r: &RECT, radius: f32, colorref: u32, width:
     });
     GdipDeletePen(pen);
     GdipDeletePath(path);
+}
+
+/// 实心多边形（箭头尖）。走 GDI+ 才有抗锯齿，GDI 的 Polygon 是硬边的。
+pub unsafe fn fill_polygon(dc: HDC, pts: &[POINT], colorref: u32) {
+    if pts.len() < 3 {
+        return;
+    }
+    let mut brush: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreateSolidFill(argb(colorref), &mut brush) != 0 {
+        return;
+    }
+    with_graphics(dc, |g| {
+        GdipFillPolygonI(g, brush, pts.as_ptr(), pts.len() as i32, FILL_WINDING);
+    });
+    GdipDeleteBrush(brush);
 }
 
 pub unsafe fn line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, colorref: u32, width: f32) {
