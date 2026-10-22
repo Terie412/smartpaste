@@ -1,6 +1,6 @@
 //! 工具条图标。
 //!
-//! assets/icons.png 是编译期嵌进来的雪碧图（三格横排，每格 96x96，
+//! assets/icons.png 是编译期嵌进来的雪碧图（九格横排，每格 96x96，
 //! 源设计是 24x24 网格按 4 倍渲染）。运行时解码、缩到按钮尺寸，
 //! 按目标颜色着色后转成 32bpp DIB 交给 AlphaBlend。
 //!
@@ -10,7 +10,7 @@
 use image::imageops::FilterType;
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
     DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
 };
 
