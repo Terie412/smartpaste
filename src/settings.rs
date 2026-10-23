@@ -22,13 +22,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, HCURSOR,
-    HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, LoadCursorW, PostMessageW, RegisterClassW,
-    SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, SM_CXSCREEN,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, LoadCursorW,
+    PostMessageW, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow,
+    CS_HREDRAW, CS_VREDRAW, HCURSOR, HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, SM_CXSCREEN,
     SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WM_APP,
-    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WNDCLASSW, WS_CAPTION, WS_EX_TOOLWINDOW, WS_OVERLAPPED, WS_SYSMENU,
+    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCALCSIZE,
+    WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION,
+    WS_EX_TOOLWINDOW, WS_OVERLAPPED, WS_SYSMENU,
 };
 
 #[link(name = "dwmapi")]
@@ -596,14 +596,7 @@ unsafe fn paint(s: &mut State) {
 
     // 第二行：恢复默认
     let (_, lh) = measure(hdc, s.f_link, "恢复默认快捷键");
-    text(
-        hdc,
-        s.f_link,
-        TXT_2,
-        CX,
-        ROW2_CY - lh / 2,
-        "恢复默认快捷键",
-    );
+    text(hdc, s.f_link, TXT_2, CX, ROW2_CY - lh / 2, "恢复默认快捷键");
 
     let default = is_default(&s.cfg);
     let label = "恢复";

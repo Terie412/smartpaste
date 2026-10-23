@@ -91,7 +91,14 @@ unsafe fn grab(src: HDC, src_x: i32, src_y: i32, w: i32, h: i32) -> Option<Scree
     bi.bmiHeader.biCompression = BI_RGB;
 
     let mut bits: *mut c_void = std::ptr::null_mut();
-    let bitmap = CreateDIBSection(mem_dc, &bi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+    let bitmap = CreateDIBSection(
+        mem_dc,
+        &bi,
+        DIB_RGB_COLORS,
+        &mut bits,
+        std::ptr::null_mut(),
+        0,
+    );
     if bitmap.is_null() || bits.is_null() {
         DeleteDC(mem_dc);
         if !bitmap.is_null() {

@@ -88,8 +88,10 @@ pub fn copy_text(s: &str) -> Result<(), String> {
 
         // 结尾必须带一个 0 终止符
         let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
-        let bytes =
-            std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * std::mem::size_of::<u16>());
+        let bytes = std::slice::from_raw_parts(
+            wide.as_ptr() as *const u8,
+            wide.len() * std::mem::size_of::<u16>(),
+        );
 
         let ok = match alloc_global(bytes) {
             Some(h) => !SetClipboardData(CF_UNICODETEXT, h).is_null(),

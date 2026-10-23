@@ -2,8 +2,8 @@
 
 use windows_sys::Win32::Foundation::{HINSTANCE, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, DeleteObject, HFONT, HGDIOBJ, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS,
-    DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, OUT_DEFAULT_PRECIS,
+    CreateFontW, DeleteObject, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 

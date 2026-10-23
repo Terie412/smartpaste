@@ -35,7 +35,11 @@ fn frame_for(px: i32) -> Option<(usize, usize)> {
             break;
         }
         // 宽高字段为 0 表示 256
-        let w = if ICO[entry] == 0 { 256 } else { ICO[entry] as i32 };
+        let w = if ICO[entry] == 0 {
+            256
+        } else {
+            ICO[entry] as i32
+        };
         let len = le32(entry + 8) as usize;
         let off = le32(entry + 12) as usize;
         if len == 0 || off + len > ICO.len() {
