@@ -16,28 +16,29 @@ use crate::win::{delete_font, hinstance, pt_in, rect, to_wide, ui_font, ui_font_
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows_sys::Win32::Graphics::Gdi::{
-    AlphaBlend, BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
-    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject,
-    GetTextExtentPoint32W, GetTextMetricsW, IntersectClipRect, InvalidateRect, Rectangle,
-    ReleaseDC, RestoreDC, SaveDC, ScreenToClient, SelectObject, SetBkMode, SetStretchBltMode,
-    SetTextColor, StretchBlt, TextOutW, UpdateWindow, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, BLENDFUNCTION, COLORONCOLOR, DIB_RGB_COLORS, HDC, HFONT, HGDIOBJ, HOLLOW_BRUSH,
-    NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY, TEXTMETRICW, TRANSPARENT,
+    AlphaBlend, BeginPaint, BitBlt, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateDIBSection, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect,
+    GetDC, GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, IntersectClipRect,
+    InvalidateRect, Rectangle, ReleaseDC, RestoreDC, SaveDC, ScreenToClient, SelectObject,
+    SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, TextOutW, UpdateWindow, AC_SRC_OVER,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, COLORONCOLOR, DIB_RGB_COLORS, HDC, HFONT,
+    HGDIOBJ, HOLLOW_BRUSH, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, SRCCOPY, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_C, VK_CONTROL,
     VK_ESCAPE, VK_RETURN, VK_S, VK_SHIFT, VK_Z,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    ChildWindowFromPointEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-    GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    LoadCursorW, PostMessageW, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
-    SetWindowPos, ShowWindow, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, EC_LEFTMARGIN,
-    EC_RIGHTMARGIN, EN_CHANGE, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, HCURSOR, IDC_SIZEALL,
-    IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-    SW_SHOW, WM_APP, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_CHILD,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    ChildWindowFromPointEx, CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, LoadCursorW, PostMessageW, RegisterClassW, SendMessageW,
+    SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow, CWP_SKIPINVISIBLE,
+    CWP_SKIPTRANSPARENT, EC_LEFTMARGIN, EC_RIGHTMARGIN, EN_CHANGE, ES_MULTILINE, ES_NOHIDESEL,
+    ES_WANTRETURN, HCURSOR, ICONINFO, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+    IDC_SIZENWSE, IDC_SIZEWE, SM_CXCURSOR, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
+    WM_APP, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_CHILD, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 // EDIT 的子类化走 comctl32。
@@ -2103,6 +2104,73 @@ fn save_styles(ov: &Overlay) {
     }
 }
 
+/// 十字光标每一段线段的长度（像素）。取偶数，图案才能对中心镜像对称。
+const CROSS_SEG: i32 = 4;
+
+/// 自己画一个"黑白交替"的十字光标，替掉系统的 `IDC_CROSS`。
+///
+/// 系统那个十字是纯黑单色，压在深色桌面上就消失了。这里不选"反色"方案：
+/// 反色在 50% 中性灰上恰好失效（128 反色是 127），而那是很常见的背景。
+/// 黑白交替则是相邻两段颜色互为正反面，任何底色上总有一半线段对比度够高，
+/// 眼睛靠这几段就能把整条十字连起来。
+///
+/// 位图按中心镜像对称，所以 `CreateBitmap` 要求的 bottom-up 行序对图案没有影响
+/// （上下翻转后像素完全一样），省掉一个容易写错的地方。
+unsafe fn make_cross_cursor() -> HCURSOR {
+    let n = GetSystemMetrics(SM_CXCURSOR).max(16);
+    let c = n / 2;
+    // 1bpp 行按 WORD 对齐；位在字节里是从高位往低位排
+    let stride = (((n + 15) / 16) * 2) as usize;
+    let mut color = vec![0u32; (n * n) as usize];
+    // 单色遮罩里 1 = 透明。即使系统不认 32bpp 的 alpha，形状也能靠它保住。
+    let mut mask = vec![0u8; stride * n as usize];
+
+    for y in 0..n {
+        for x in 0..n {
+            if x != c && y != c {
+                let byte = y as usize * stride + (x / 8) as usize;
+                mask[byte] |= 0x80 >> (x % 8);
+                continue;
+            }
+            // 黑白沿两条轴各自交替，距中心 SE段 换一次色
+            let d = (if x == c { y - c } else { x - c }).abs();
+            let white = (d / CROSS_SEG) % 2 == 1;
+            // 0xAARRGGBB；纯黑纯白在 R/B 颠倒时也不变，不用管通道顺序
+            color[(y * n + x) as usize] = if white { 0xFFFF_FFFF } else { 0xFF00_0000 };
+        }
+    }
+
+    let hbm_color = CreateBitmap(n, n, 1, 32, color.as_ptr() as *const core::ffi::c_void);
+    let hbm_mask = CreateBitmap(n, n, 1, 1, mask.as_ptr() as *const core::ffi::c_void);
+    if hbm_color.is_null() || hbm_mask.is_null() {
+        if !hbm_color.is_null() {
+            DeleteObject(hbm_color as HGDIOBJ);
+        }
+        if !hbm_mask.is_null() {
+            DeleteObject(hbm_mask as HGDIOBJ);
+        }
+        return LoadCursorW(std::ptr::null_mut(), IDC_CROSS);
+    }
+
+    let info = ICONINFO {
+        fIcon: 0, // FALSE = 光标
+        xHotspot: c as u32,
+        yHotspot: c as u32,
+        hbmMask: hbm_mask,
+        hbmColor: hbm_color,
+    };
+    let cur = CreateIconIndirect(&info);
+    // 位图已经交给光标对象，原始位图不再需要
+    DeleteObject(hbm_color as HGDIOBJ);
+    DeleteObject(hbm_mask as HGDIOBJ);
+
+    if cur.is_null() {
+        crate::win::trace("overlay: 十字光标创建失败，回退系统光标");
+        return LoadCursorW(std::ptr::null_mut(), IDC_CROSS);
+    }
+    cur
+}
+
 pub fn register() {
     unsafe {
         let class = to_wide(CLASS_NAME);
@@ -2110,10 +2178,8 @@ pub fn register() {
             style: 0x0002 | 0x0001, // CS_HREDRAW | CS_VREDRAW
             lpfnWndProc: Some(overlay_wndproc),
             hInstance: hinstance(),
-            hCursor: windows_sys::Win32::UI::WindowsAndMessaging::LoadCursorW(
-                std::ptr::null_mut(),
-                windows_sys::Win32::UI::WindowsAndMessaging::IDC_CROSS,
-            ),
+            // 十字光标：黑白交替，任何底色上都看得见
+            hCursor: make_cross_cursor(),
             lpszClassName: class.as_ptr(),
             ..std::mem::zeroed()
         };
