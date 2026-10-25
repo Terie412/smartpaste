@@ -224,7 +224,23 @@ fn ensure_single_instance() -> bool {
         if h.is_null() {
             return true;
         }
-        GetLastError() != ERROR_ALREADY_EXISTS
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            // 以前是静默退出，结果"更新了程序但跑的还是旧进程"，很难查。
+            // 这里明确告诉用户：托盘里那个实例才是正在跑的代码。
+            let text = to_wide(
+                "SmartPaste 已经在运行，图标在系统托盘里。\n\n\
+                 如果刚刚更新了程序，请先在托盘图标上右键 → 退出，再重新启动。",
+            );
+            let caption = to_wide("SmartPaste");
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                caption.as_ptr(),
+                MB_OK | MB_ICONWARNING,
+            );
+            return false;
+        }
+        true
     }
 }
 

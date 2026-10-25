@@ -69,10 +69,7 @@ struct Session {
     join: Option<JoinHandle<windows::core::Result<Report>>>,
     frame: HWND,
     hud: HWND,
-    /// 控制条是否成功从捕获里排除了。false 说明系统太老，只能放选区外
-    hud_excluded: bool,
     main: HWND,
-    rect: RECT,
     path: String,
     ask_save: bool,
 }
@@ -176,9 +173,9 @@ pub fn start(main: HWND, rect: RECT, cfg: &Config) -> Result<(), String> {
         crate::win::trace(&format!(
             "record: hud {}",
             if hud_excluded {
-                "已从捕获排除，放选区中下方"
+                "选区外已放不下，贴在选区内并用 WDA_EXCLUDEFROMCAPTURE 排除"
             } else {
-                "无法排除，放选区外"
+                "放在选区外"
             }
         ));
 
@@ -208,9 +205,7 @@ pub fn start(main: HWND, rect: RECT, cfg: &Config) -> Result<(), String> {
             join: Some(join),
             frame,
             hud,
-            hud_excluded,
             main,
-            rect,
             path,
             ask_save,
         });
@@ -223,7 +218,7 @@ pub fn refresh() {
     unsafe {
         if let Some(s) = S.as_ref() {
             let secs = s.progress.load(Ordering::Relaxed);
-            paint_hud(s.hud, s.rect, secs, s.hud_excluded);
+            paint_hud(s.hud, secs);
         }
     }
 }
@@ -406,35 +401,40 @@ unsafe fn create_frame(rect: RECT) -> Option<HWND> {
 
 /// 控制条放哪儿。
 ///
-/// - 能从捕获里排除（Win10 2004+）：固定在选区水平居中、距底边 24px，
-///   录制画面里看不到它
-/// - 排不掉：退回原来的"选区上方 → 下方 → 屏幕底边"，宁可放外面也不挡内容
-fn hud_pos(rect: RECT, excluded: bool) -> (i32, i32) {
+/// 优先放选区**外面**（上 → 下 → 右 → 左）：外面一定既看得见、又录不到，
+/// 完全不依赖任何系统 API。只有四面都被屏幕边缘挡住（基本就是全屏录制）时，
+/// 才退到选区内部底边居中，这时必须能从捕获里排除，否则会入镜。
+fn hud_pos_outside(rect: RECT) -> Option<(i32, i32)> {
     let (vx, vy, vw, vh) = crate::capture::desktop_bounds();
+    let gap = 10;
+    let cx = rect.left + (rect.right - rect.left - HUD_W) / 2;
+    let cy = rect.top + (rect.bottom - rect.top - HUD_H) / 2;
 
-    if excluded {
-        let x = rect.left + (rect.right - rect.left - HUD_W) / 2;
-        // 贴着任务栏放会被压住，往上让出 72px
-        let y = rect.bottom - HUD_H - 72;
-        return (
-            x.clamp(vx, (vx + vw - HUD_W).max(vx)),
-            y.clamp(vy, (vy + vh - HUD_H).max(vy)),
-        );
-    }
+    let spots = [
+        (cx, rect.top - HUD_H - gap),      // 上
+        (cx, rect.bottom + gap),           // 下
+        (rect.right + gap, cy),            // 右
+        (rect.left - HUD_W - gap, cy),     // 左
+    ];
+    spots
+        .into_iter()
+        .find(|&(x, y)| x >= vx && y >= vy && x + HUD_W <= vx + vw && y + HUD_H <= vy + vh)
+}
 
-    let x = rect.left.clamp(vx, (vx + vw - HUD_W).max(vx));
-    let mut y = rect.top - HUD_H - 10;
-    if y < vy {
-        y = rect.bottom + 10;
-    }
-    if y + HUD_H > vy + vh {
-        y = vy + vh - HUD_H - 10;
-    }
-    (x, y)
+/// 选区里放不下时用的位置：水平居中，距底边 72px（让开任务栏）。
+fn hud_pos_inside(rect: RECT) -> (i32, i32) {
+    let (vx, vy, vw, vh) = crate::capture::desktop_bounds();
+    let x = rect.left + (rect.right - rect.left - HUD_W) / 2;
+    let y = rect.bottom - HUD_H - 72;
+    (
+        x.clamp(vx, (vx + vw - HUD_W).max(vx)),
+        y.clamp(vy, (vy + vh - HUD_H).max(vy)),
+    )
 }
 
 unsafe fn create_hud(rect: RECT) -> Option<(HWND, bool)> {
-    let (x, y) = hud_pos(rect, false);
+    let outside = hud_pos_outside(rect);
+    let (x, y) = outside.unwrap_or_else(|| hud_pos_inside(rect));
     let class = to_wide(HUD_CLASS);
     let title = to_wide("SmartPaste 录制控制");
     // 不用 layered：SetWindowDisplayAffinity 和 UpdateLayeredWindow 一起用时，
@@ -460,30 +460,40 @@ unsafe fn create_hud(rect: RECT) -> Option<(HWND, bool)> {
     let rgn = CreateRoundRectRgn(0, 0, HUD_W + 1, HUD_H + 1, 20, 20);
     SetWindowRgn(hwnd, rgn, 0);
 
-    // 先显示再设亲和性：反过来的话窗口可能进不了显示管道
-    paint_hud(hwnd, rect, 0, false);
+    paint_hud(hwnd, 0);
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
-    // Win10 2004+ 才有 WDA_EXCLUDEFROMCAPTURE；旧系统返回失败，退回选区外
-    let excluded = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) != 0;
-    if excluded {
-        let (nx, ny) = hud_pos(rect, true);
-        SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            nx,
-            ny,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-        paint_hud(hwnd, rect, 0, true);
+    // 放在选区外面就不用排除，省掉一次可能出问题的系统调用
+    if outside.is_some() {
+        return Some((hwnd, false));
+    }
+
+    // SMARTPASTE_HUD_NOEXCLUDE=1 可跳过排除，用来区分"没画出来"和"被排除掉了"
+    // Win10 2004+ 才有 WDA_EXCLUDEFROMCAPTURE；旧系统返回失败，只能尽量放远一点
+    let excluded = if std::env::var_os("SMARTPASTE_HUD_NOEXCLUDE").is_some() {
+        false
+    } else {
+        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) != 0
+    };
+    if !excluded {
+        // 排除不了就别把控制条摆在录像中间，退到选区外最合适的位置
+        if let Some((fx, fy)) = hud_pos_outside(rect) {
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                fx,
+                fy,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
     }
     Some((hwnd, excluded))
 }
 
 /// 重画控制条：画到窗口自己的 DC 上。
-unsafe fn paint_hud(hwnd: HWND, _rect: RECT, secs: u64, _excluded: bool) {
+unsafe fn paint_hud(hwnd: HWND, secs: u64) {
     if hwnd.is_null() {
         return;
     }
