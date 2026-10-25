@@ -327,4 +327,15 @@ CPU 口径：进程 CPU 时间 ÷ 墙钟时间，1.2% = 0.012 个核。
 （`WM_NCCALCSIZE` 返回 0），所有 `ui(378)` 这类值直接加窗口偏移即可。
 目测过一次差了 90px，凭空多排查了半小时。
 
+---
+
+## 12. 提交约定（本仓库的工作习惯，不要外推到别的项目）
+
+- **改完立即 `commit` + `push`**，不要攒着等提醒。
+- **一个改动一个 commit**，不把不相关的改动塞进同一个提交。
+- 提交信息沿用仓库现有风格：`feat(scope): …` / `fix(scope): …` / `docs: …`，正文中文。
+- 提交前先 `git status` 确认没有把 `temp/`、测试产物、`%USERPROFILE%\Videos` 里的
+  录制文件带进来（`temp/` 与 `assets/_*.png` 已 git 忽略，但 Videos 不在仓库内）。
+- 推送后确认 `git log origin/main --oneline -1` 与本地 HEAD 一致再收工。
+
 
