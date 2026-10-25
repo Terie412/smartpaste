@@ -15,17 +15,18 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT, SIZE, SYSTEMTIME};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
-    AC_SRC_ALPHA, AC_SRC_OVER,
+    BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC,
+    DeleteObject, EndPaint, GetDC, ReleaseDC, SelectObject, SetWindowRgn, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT,
+    SRCCOPY, AC_SRC_ALPHA, AC_SRC_OVER,
 };
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_HAND};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, PostMessageW, RegisterClassW,
-    SetWindowDisplayAffinity, ShowWindow, UpdateLayeredWindow, SW_SHOWNOACTIVATE, ULW_ALPHA,
-    WDA_EXCLUDEFROMCAPTURE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WM_LBUTTONUP, WM_SETCURSOR, WS_POPUP,
+    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOSIZE, UpdateLayeredWindow, SW_SHOWNOACTIVATE, ULW_ALPHA,
+    WDA_EXCLUDEFROMCAPTURE, WM_LBUTTONUP, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const FRAME_CLASS: &str = "SmartPasteRecFrame";
@@ -78,6 +79,9 @@ struct Session {
 
 static mut S: Option<Session> = None;
 
+/// 控制条最后一次绘制的秒数，窗口被遮挡后重画要用。
+static mut HUD_SECS: u64 = 0;
+
 pub fn register() {
     unsafe {
         let frame_class = to_wide(FRAME_CLASS);
@@ -115,6 +119,13 @@ extern "system" fn hud_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> isize
                         PostMessageW(s.main, WM_REC_STOP, 0, 0);
                     }
                 }
+                0
+            }
+            WM_PAINT => {
+                let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                paint_hud_dc(hdc, HUD_SECS);
+                EndPaint(hwnd, &mut ps);
                 0
             }
             WM_SETCURSOR => {
@@ -403,7 +414,8 @@ fn hud_pos(rect: RECT, excluded: bool) -> (i32, i32) {
 
     if excluded {
         let x = rect.left + (rect.right - rect.left - HUD_W) / 2;
-        let y = rect.bottom - HUD_H - 24;
+        // 贴着任务栏放会被压住，往上让出 72px
+        let y = rect.bottom - HUD_H - 72;
         return (
             x.clamp(vx, (vx + vw - HUD_W).max(vx)),
             y.clamp(vy, (vy + vh - HUD_H).max(vy)),
@@ -425,8 +437,10 @@ unsafe fn create_hud(rect: RECT) -> Option<(HWND, bool)> {
     let (x, y) = hud_pos(rect, false);
     let class = to_wide(HUD_CLASS);
     let title = to_wide("SmartPaste 录制控制");
+    // 不用 layered：SetWindowDisplayAffinity 和 UpdateLayeredWindow 一起用时，
+    // 窗口在显示器上也会一起消失。普通窗口 + 圆角区域最稳。
     let hwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         class.as_ptr(),
         title.as_ptr(),
         WS_POPUP,
@@ -443,19 +457,46 @@ unsafe fn create_hud(rect: RECT) -> Option<(HWND, bool)> {
         return None;
     }
 
+    let rgn = CreateRoundRectRgn(0, 0, HUD_W + 1, HUD_H + 1, 20, 20);
+    SetWindowRgn(hwnd, rgn, 0);
+
+    // 先显示再设亲和性：反过来的话窗口可能进不了显示管道
+    paint_hud(hwnd, rect, 0, false);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+
     // Win10 2004+ 才有 WDA_EXCLUDEFROMCAPTURE；旧系统返回失败，退回选区外
     let excluded = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) != 0;
-
-    paint_hud(hwnd, rect, 0, excluded);
-    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    if excluded {
+        let (nx, ny) = hud_pos(rect, true);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            nx,
+            ny,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        paint_hud(hwnd, rect, 0, true);
+    }
     Some((hwnd, excluded))
 }
 
-/// 重画控制条。背景圆角 + 红点 + 时长 + 停止按钮，整张走预乘 alpha。
-unsafe fn paint_hud(hwnd: HWND, rect: RECT, secs: u64, excluded: bool) {
+/// 重画控制条：画到窗口自己的 DC 上。
+unsafe fn paint_hud(hwnd: HWND, _rect: RECT, secs: u64, _excluded: bool) {
     if hwnd.is_null() {
         return;
     }
+    HUD_SECS = secs;
+    let hdc = GetDC(hwnd);
+    if hdc.is_null() {
+        return;
+    }
+    paint_hud_dc(hdc, secs);
+    ReleaseDC(hwnd, hdc);
+}
+
+unsafe fn paint_hud_dc(hdc: HDC, secs: u64) {
     let screen = GetDC(std::ptr::null_mut());
     if screen.is_null() {
         return;
@@ -522,8 +563,7 @@ unsafe fn paint_hud(hwnd: HWND, rect: RECT, secs: u64, excluded: bool) {
     let f_btn = crate::gdiplus::FontSpec::new(12.5, true, "Microsoft YaHei");
     crate::gdiplus::draw_text(dc, &f_btn, rgb(0xFF, 0xFF, 0xFF), 138, 15, "停止");
 
-    let (x, y) = hud_pos(rect, excluded);
-    blit_layered(hwnd, screen, dc, x, y, HUD_W, HUD_H);
+    BitBlt(hdc, 0, 0, HUD_W, HUD_H, dc, 0, 0, SRCCOPY);
 
     SelectObject(dc, old);
     DeleteObject(bmp as HGDIOBJ);

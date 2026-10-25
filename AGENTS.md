@@ -289,10 +289,11 @@ CPU 口径：进程 CPU 时间 ÷ 墙钟时间，1.2% = 0.012 个核。
   两条路径都要判 `session::is_recording()`。
 - 红框是 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` 的分层窗口，
   画在选区**外面** 3px。位置在选区外，所以不会被 DDA 录进去。
-- 控制条是另一个 layered 窗口，**不穿透**——它要接收点击。位置固定在选区
-  水平居中、距底边 24px，并用 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`
-  从捕获里排除。实测 DDA 下被排除的窗口区域显示的是**窗口后面的内容**，
-  不是黑块，所以全屏录制也不会穿帮。
+- 控制条是**普通窗口 + `SetWindowRgn` 圆角**，不是 layered。
+  `UpdateLayeredWindow` 和 `WDA_EXCLUDEFROMCAPTURE` 一起用时，窗口在显示器上
+  也会一起消失（实测 `IsWindowVisible` 返回 1，但屏幕上看不见）。改成普通窗口
+  后正常：显示器可见、捕获里没有、下层内容直接透出。
+- 位置固定在选区水平居中、距底边 72px（让开任务栏；贴 24px 会被任务栏压住）。
 - `WDA_EXCLUDEFROMCAPTURE` 要 Win10 2004+。老系统调用返回 0，这时控制条
   回退到"选区上方 → 下方 → 屏幕底边"，宁可挡在选区外面也不污染录像。
 - 副作用：系统截图（Win+Shift+S）和其他录屏软件同样看不到控制条，这是 API
