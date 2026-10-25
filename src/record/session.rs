@@ -506,6 +506,10 @@ unsafe fn create_hud(rect: RECT) -> Option<(HWND, bool)> {
                 0,
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
+        } else {
+            crate::win::trace(
+                "record: 警告 —— 无法排除捕获且选区四周放不下，控制条会出现在录像里",
+            );
         }
     }
     Some((hwnd, excluded))
