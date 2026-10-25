@@ -16,9 +16,9 @@ use std::thread::JoinHandle;
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT, SIZE, SYSTEMTIME};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC,
-    DeleteObject, EndPaint, GetDC, ReleaseDC, SelectObject, SetWindowRgn, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT,
-    SRCCOPY, AC_SRC_ALPHA, AC_SRC_OVER,
+    DeleteObject, EndPaint, GetDC, GetMonitorInfoW, MonitorFromRect, ReleaseDC, SelectObject,
+    SetWindowRgn, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC,
+    HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY, AC_SRC_ALPHA, AC_SRC_OVER,
 };
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_HAND};
@@ -399,13 +399,32 @@ unsafe fn create_frame(rect: RECT) -> Option<HWND> {
     Some(hwnd)
 }
 
+/// 选区所在显示器的工作区（已经扣掉任务栏）。
+///
+/// 不能直接用整个屏幕：控制条一旦落到任务栏那 60px 上，就会被任务栏压住，
+/// 看得见却点不到。
+fn work_area(rect: RECT) -> (i32, i32, i32, i32) {
+    unsafe {
+        let mon = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
+        if !mon.is_null() {
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(mon, &mut mi) != 0 {
+                let r = mi.rcWork;
+                return (r.left, r.top, r.right - r.left, r.bottom - r.top);
+            }
+        }
+    }
+    crate::capture::desktop_bounds()
+}
+
 /// 控制条放哪儿。
 ///
 /// 优先放选区**外面**（上 → 下 → 右 → 左）：外面一定既看得见、又录不到，
-/// 完全不依赖任何系统 API。只有四面都被屏幕边缘挡住（基本就是全屏录制）时，
+/// 完全不依赖任何系统 API。只有四面都被工作区边缘挡住（全屏或接近全屏）时，
 /// 才退到选区内部底边居中，这时必须能从捕获里排除，否则会入镜。
 fn hud_pos_outside(rect: RECT) -> Option<(i32, i32)> {
-    let (vx, vy, vw, vh) = crate::capture::desktop_bounds();
+    let (vx, vy, vw, vh) = work_area(rect);
     let gap = 10;
     let cx = rect.left + (rect.right - rect.left - HUD_W) / 2;
     let cy = rect.top + (rect.bottom - rect.top - HUD_H) / 2;
@@ -423,7 +442,7 @@ fn hud_pos_outside(rect: RECT) -> Option<(i32, i32)> {
 
 /// 选区里放不下时用的位置：水平居中，距底边 72px（让开任务栏）。
 fn hud_pos_inside(rect: RECT) -> (i32, i32) {
-    let (vx, vy, vw, vh) = crate::capture::desktop_bounds();
+    let (vx, vy, vw, vh) = work_area(rect);
     let x = rect.left + (rect.right - rect.left - HUD_W) / 2;
     let y = rect.bottom - HUD_H - 72;
     (
