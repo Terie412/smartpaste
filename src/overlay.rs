@@ -13,7 +13,7 @@ use crate::capture::{self, Screen};
 use crate::edit::{self, Doc, Kind, Shape, Style};
 use crate::icons::IconSet;
 use crate::win::{delete_font, hinstance, pt_in, rect, to_wide, ui_font, ui_font_w};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC,
@@ -31,13 +31,15 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ChildWindowFromPointEx, CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, LoadCursorW, PostMessageW, RegisterClassW, SendMessageW,
-    SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow, CWP_SKIPINVISIBLE,
+    GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW, PostMessageW, RegisterClassW,
+    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    CWP_SKIPINVISIBLE,
     CWP_SKIPTRANSPARENT, EC_LEFTMARGIN, EC_RIGHTMARGIN, EN_CHANGE, ES_MULTILINE, ES_NOHIDESEL,
     ES_WANTRETURN, HCURSOR, ICONINFO, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
     IDC_SIZENWSE, IDC_SIZEWE, SM_CXCURSOR, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
     WM_APP, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW, WS_CHILD, WS_EX_TOOLWINDOW,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_CHILD,
+    WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
@@ -59,6 +61,10 @@ pub const CMD_COPY: u32 = 1;
 pub const CMD_SAVE: u32 = 2;
 pub const CMD_PIN: u32 = 3;
 pub const CMD_CANCEL: u32 = 4;
+pub const CMD_RECORD: u32 = 5;
+
+/// 倒计时定时器。用 SetTimer 而不是自己开线程，遮罩本来就有消息循环。
+const TIMER_COUNTDOWN: usize = 0x51;
 
 /// 遮罩窗口结束后，把结果发回主窗口
 pub const WM_SNAP_DONE: u32 = WM_APP + 2;
@@ -260,6 +266,7 @@ pub enum Act {
     Copy,
     Save,
     Pin,
+    Record,
 }
 
 pub struct Button {
@@ -330,6 +337,9 @@ pub struct Overlay {
     mask_dc: HDC,
     mask_bmp: windows_sys::Win32::Graphics::Gdi::HBITMAP,
     label_font: HFONT,
+    /// 录制倒计时剩余秒数，0 表示没在倒计时
+    pub countdown: i32,
+    count_font: HFONT,
 }
 
 static mut OVERLAY: Option<Box<Overlay>> = None;
@@ -338,6 +348,8 @@ static mut PENDING_CMD: u32 = CMD_NONE;
 /// 裁剪结果（交给主窗口做复制/保存/钉图）
 static mut PENDING_IMAGE: Option<image::RgbaImage> = None;
 static mut PENDING_ORIGIN: POINT = POINT { x: 0, y: 0 };
+/// 录制用的选区（屏幕物理像素）
+static mut PENDING_RECT: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
 static mut MAIN_HWND: HWND = std::ptr::null_mut();
 /// 调试用：启动后直接锁定的选区 (x, y, w, h)
 static mut PRESET: Option<(i32, i32, i32, i32)> = None;
@@ -505,6 +517,7 @@ impl Overlay {
             (Act::Tool(Tool::Pen), 6),
             (Act::Tool(Tool::Text), 7),
             (Act::Tool(Tool::Eraser), 8),
+            (Act::Record, 9),
             (Act::Save, 1),
             (Act::Pin, 2),
             (Act::Copy, 0),
@@ -771,6 +784,32 @@ impl Overlay {
     }
 
     fn finish(&mut self, cmd: u32) {
+        // 录制不截图、不标注，只需要把选区范围交出去，省掉一次整块裁剪
+        if cmd == CMD_RECORD {
+            unsafe {
+                KillTimer(self.hwnd, TIMER_COUNTDOWN);
+                self.countdown = 0;
+                if let Some(sel) = self.selection() {
+                    PENDING_RECT = rect(
+                        self.screen.x + sel.left,
+                        self.screen.y + sel.top,
+                        self.screen.x + sel.right,
+                        self.screen.y + sel.bottom,
+                    );
+                }
+                PENDING_CMD = cmd;
+                crate::win::trace(&format!(
+                    "overlay: record sel=({},{},{},{})",
+                    PENDING_RECT.left, PENDING_RECT.top, PENDING_RECT.right, PENDING_RECT.bottom
+                ));
+                if !MAIN_HWND.is_null() {
+                    PostMessageW(MAIN_HWND, WM_SNAP_DONE, cmd as usize, 0);
+                } else {
+                    DestroyWindow(self.hwnd);
+                }
+            }
+            return;
+        }
         if cmd == CMD_COPY || cmd == CMD_SAVE || cmd == CMD_PIN {
             let Some(sel) = self.selection() else {
                 return;
@@ -1156,6 +1195,13 @@ impl Overlay {
                 );
             }
 
+            // 6.5 录制倒计时，盖在最上层
+            if self.countdown > 0 {
+                if let Some(s) = self.selection() {
+                    draw_countdown(self.back_dc, &s, self.countdown, self.count_font, self.label_font);
+                }
+            }
+
             // 7. 上屏
             BitBlt(hdc, 0, 0, w, h, self.back_dc, 0, 0, SRCCOPY);
             EndPaint(self.hwnd, &ps);
@@ -1179,6 +1225,7 @@ impl Drop for Overlay {
                 DeleteObject(self.mask_bmp as HGDIOBJ);
             }
             delete_font(self.label_font);
+            delete_font(self.count_font);
         }
     }
 }
@@ -1262,6 +1309,54 @@ unsafe fn draw_size_label(hdc: HDC, s: &RECT, font: HFONT) {
     SelectObject(hdc, old_f);
 }
 
+unsafe fn draw_countdown(dc: HDC, sel: &RECT, n: i32, big: HFONT, small: HFONT) {
+    let cx = (sel.left + sel.right) / 2;
+    let cy = (sel.top + sel.bottom) / 2;
+
+    let num = format!("{n}");
+    let wide = crate::win::to_wide(&num);
+    let sub = crate::win::to_wide("秒后开始录制");
+
+    let old = SelectObject(dc, big);
+    let mut sz: SIZE = std::mem::zeroed();
+    GetTextExtentPoint32W(dc, wide.as_ptr(), (wide.len() - 1) as i32, &mut sz);
+
+    SelectObject(dc, small);
+    let mut sz2: SIZE = std::mem::zeroed();
+    GetTextExtentPoint32W(dc, sub.as_ptr(), (sub.len() - 1) as i32, &mut sz2);
+    SelectObject(dc, old);
+
+    let pad = ui(26);
+    let gap = ui(6);
+    let panel_w = sz.cx.max(sz2.cx) + pad * 2;
+    let panel_h = sz.cy + gap + sz2.cy + pad * 2;
+    let panel = rect(cx - panel_w / 2, cy - panel_h / 2, cx + panel_w / 2, cy + panel_h / 2);
+    round_fill(dc, &panel, ui(18), rgb(0x00, 0x00, 0x00));
+    round_stroke(dc, &panel, ui(18), rgb(0x3A, 0x3A, 0x44));
+
+    SetBkMode(dc, TRANSPARENT as i32);
+    SetTextColor(dc, rgb(0xFF, 0xFF, 0xFF));
+    SelectObject(dc, big);
+    TextOutW(
+        dc,
+        cx - sz.cx / 2,
+        panel.top + pad,
+        wide.as_ptr(),
+        (wide.len() - 1) as i32,
+    );
+
+    SetTextColor(dc, rgb(0xB4, 0xB4, 0xBE));
+    SelectObject(dc, small);
+    TextOutW(
+        dc,
+        cx - sz2.cx / 2,
+        panel.top + pad + sz.cy + gap,
+        sub.as_ptr(),
+        (sub.len() - 1) as i32,
+    );
+    SelectObject(dc, old);
+}
+
 unsafe fn draw_bar(
     dc: HDC,
     buttons: &[Button],
@@ -1321,15 +1416,28 @@ unsafe fn draw_bar(
             );
         }
 
-        let set = if selected {
-            &icons.active
+        if b.act == Act::Record {
+            // 雪碧图里没有录制图标，直接画一个实心红点
+            let cx = (b.rect.left + b.rect.right) / 2;
+            let cy = (b.rect.top + b.rect.bottom) / 2;
+            let r = ui(8);
+            crate::gdiplus::fill_round(
+                dc,
+                &rect(cx - r, cy - r, cx + r, cy + r),
+                r as f32,
+                rgb(0xFF, 0x2E, 0x63),
+            );
         } else {
-            &icons.normal
-        };
-        if let Some(icon) = set.get(b.icon) {
-            let ix = (b.rect.left + b.rect.right - crate::icons::SIZE) / 2;
-            let iy = (b.rect.top + b.rect.bottom - crate::icons::SIZE) / 2;
-            icon.draw(dc, ix, iy);
+            let set = if selected {
+                &icons.active
+            } else {
+                &icons.normal
+            };
+            if let Some(icon) = set.get(b.icon) {
+                let ix = (b.rect.left + b.rect.right - crate::icons::SIZE) / 2;
+                let iy = (b.rect.top + b.rect.bottom - crate::icons::SIZE) / 2;
+                icon.draw(dc, ix, iy);
+            }
         }
     }
 
@@ -1906,6 +2014,16 @@ extern "system" fn overlay_wndproc(
                             Act::Copy => ov.finish(CMD_COPY),
                             Act::Save => ov.finish(CMD_SAVE),
                             Act::Pin => ov.finish(CMD_PIN),
+                            Act::Record => {
+                                let secs = crate::config::Config::load().record_countdown;
+                                if secs == 0 {
+                                    ov.finish(CMD_RECORD);
+                                } else {
+                                    ov.countdown = secs as i32;
+                                    SetTimer(hwnd, TIMER_COUNTDOWN, 1000, None);
+                                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                                }
+                            }
                         }
                         return 0;
                     }
@@ -2055,6 +2173,16 @@ extern "system" fn overlay_wndproc(
                 crate::win::trace("overlay: WM_GETOBJECT -> 0");
                 0
             } // WM_GETOBJECT
+            WM_TIMER if wparam == TIMER_COUNTDOWN => {
+                ov.countdown -= 1;
+                if ov.countdown <= 0 {
+                    KillTimer(hwnd, TIMER_COUNTDOWN);
+                    ov.finish(CMD_RECORD);
+                } else {
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+                0
+            }
             WM_PAINT => {
                 ov.paint();
                 0
@@ -2293,6 +2421,8 @@ pub fn start() -> bool {
             mask_dc,
             mask_bmp,
             label_font: ui_font(ui(12)),
+            countdown: 0,
+            count_font: ui_font(ui(64)),
         }));
 
         let hwnd = CreateWindowExW(
@@ -2356,6 +2486,11 @@ pub fn start() -> bool {
         }
         true
     }
+}
+
+/// 录制用的选区（屏幕物理像素）。和 take_pending 分开，避免为了拿坐标去裁剪整张图。
+pub fn take_rect() -> RECT {
+    unsafe { PENDING_RECT }
 }
 
 pub fn take_pending() -> (u32, Option<image::RgbaImage>, POINT) {

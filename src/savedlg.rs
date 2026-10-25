@@ -24,9 +24,47 @@ pub fn default_name() -> String {
 
 /// 弹框让用户选路径。返回 None 表示用户取消。
 pub fn ask(owner: HWND, initial_dir: Option<&str>, default_name: &str) -> Option<PathBuf> {
-    let filter: Vec<u16> = "PNG 图片\0*.png\0所有文件\0*.*\0\0"
-        .encode_utf16()
-        .collect();
+    ask_file(
+        owner,
+        initial_dir,
+        default_name,
+        "PNG 图片\0*.png\0所有文件\0*.*\0\0",
+        "保存截图",
+        "png",
+    )
+}
+
+/// 录像的另存为。
+pub fn ask_video(owner: HWND, initial_dir: Option<&str>, default_name: &str) -> Option<PathBuf> {
+    ask_file(
+        owner,
+        initial_dir,
+        default_name,
+        "MP4 视频\0*.mp4\0所有文件\0*.*\0\0",
+        "保存录像",
+        "mp4",
+    )
+}
+
+/// 录像默认文件名：SmartPaste_20261025-231500.mp4
+pub fn video_name() -> String {
+    let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe { GetLocalTime(&mut st) };
+    format!(
+        "SmartPaste_{:04}{:02}{:02}-{:02}{:02}{:02}.mp4",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+    )
+}
+
+fn ask_file(
+    owner: HWND,
+    initial_dir: Option<&str>,
+    default_name: &str,
+    filter_str: &str,
+    title_str: &str,
+    ext_str: &str,
+) -> Option<PathBuf> {
+    let filter: Vec<u16> = filter_str.encode_utf16().collect();
     let mut file: Vec<u16> = vec![0; 1024];
     let name: Vec<u16> = default_name.encode_utf16().collect();
     if name.len() < file.len() {
@@ -36,8 +74,8 @@ pub fn ask(owner: HWND, initial_dir: Option<&str>, default_name: &str) -> Option
         Some(d) => d.encode_utf16().chain([0]).collect(),
         None => vec![0],
     };
-    let title: Vec<u16> = "保存截图".encode_utf16().chain([0]).collect();
-    let ext: Vec<u16> = "png".encode_utf16().chain([0]).collect();
+    let title: Vec<u16> = title_str.encode_utf16().chain([0]).collect();
+    let ext: Vec<u16> = ext_str.encode_utf16().chain([0]).collect();
 
     let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
     ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;

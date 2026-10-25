@@ -6,6 +6,24 @@ description = "Lightweight screenshot + pin-to-screen tool (Win32/GDI)"
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
+# 录屏模块用 windows（COM 接口封装），其余代码仍走 windows-sys。
+# 两者可以共存，只在边界处转 HWND/HANDLE。
+windows = { version = "0.59", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D10",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",

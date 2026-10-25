@@ -213,3 +213,117 @@ UI_SCALE = (5, 4)
 - **截图验证光标**：全屏 BitBlt 不含光标，要 `GetCursorInfo` 拿到句柄再 `DrawIconEx`
   自己叠上去。注意目标 DC 的原点是裁剪框左上角，不是屏幕原点（写错过一次，
   表现为"截出来根本没有光标"）。工具见 `temp/curcap.py`。
+
+---
+
+## 11. 录屏（`record/`）：全 GPU 通路
+
+### 11.1 数据流
+
+```
+DDA 整屏纹理
+  → CopySubresourceRegion 裁到 clean
+  → CopyResource 到输出画布（6 张轮转）
+  → 光标 64×64 小块回填
+  → MFCreateDXGISurfaceBuffer
+  → SinkWriter（硬编）→ MP4
+```
+
+整帧不回读 CPU。唯一往返 CPU 的是光标覆盖的那一小块。
+
+### 11.2 三个必踩的坑
+
+1. **`MFCreateDXGISurfaceBuffer` 之后必须 `SetCurrentLength(w*h*4)`**。
+   不补这句，`WriteSample` 直接返回 `E_INVALIDARG`，而错误信息完全不指向这里。
+   文档里没写，只有踩过的人知道。
+2. **指定 adapter 时 driver type 必须是 `D3D_DRIVER_TYPE_UNKNOWN`**。
+   `D3D11CreateDevice(Some(&adapter), D3D_DRIVER_TYPE_HARDWARE, ...)` 会返回
+   `E_INVALIDARG`。DDA 必须按 adapter 枚举（`DuplicateOutput` 要 device 和 output
+   同源），所以这个躲不开。
+3. **`WM_APP + n` 的消息常量会撞值**。`WM_SNAP_DONE` 和后来的 `WM_REC_STOP`
+   都取了 `WM_APP + 2`，编译只报一句 `unreachable pattern`，运行时表现为
+   "点了停止没反应"——消息被前一个分支悄悄吃掉了。加消息前先 grep 一遍
+   `WM_APP +`。
+4. **局部更新要用 `DEFAULT` 上传纹理 + `CopySubresourceRegion`**。
+   `read_block` 能读回来，不代表 MF 能读到 —— 实测 `UpdateSubresource` 带 box 的
+   局部更新在编码结果里完全不可见，整帧更新却正常。另外
+   `D3D11_USAGE_DYNAMIC` 的纹理**不能**当 `CopySubresourceRegion` 的源，会静默失败。
+
+### 11.3 其它约定
+
+- 画布 6 张轮转。MF 异步读纹理，张数少了会读到被后续帧覆盖的内容。
+- 光标小块：`GetCursorInfo` + `GetIconInfo`，画完必须
+  `DeleteObject(hbmMask/hbmColor)`，否则每帧泄漏两个 GDI 对象。
+- 帧节奏用 `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`。`Sleep(1)` 的 15.6ms 精度
+  喂不了 60fps。
+- 编码跟不上时**跳帧并推进时间戳**，成片时长才准；不能"少写几帧但时间戳连续"。
+- DDA 只在屏幕变化时给帧，无新帧就复用 `clean` 画布。
+- HDR 屏输出 `R16G16B16A16_FLOAT`，v1 直接拒绝并提示关 HDR；跨屏不支持，
+  选区必须完整落在一块显示器内（`Capturer::new` 会拒绝）。
+- `DXGI_ERROR_ACCESS_LOST` 只能停止并 `Finalize`，不要热重建——会让时间戳断裂。
+- 调试入口：`smartpaste --rectest x y w h seconds [path] [fps]`，结果写
+  `%TEMP%\smartpaste.log`；加 `--soft` 强制微软软编做对照。
+
+### 11.4 实测基线（2560×1440 / RTX 3060 Ti / Win11 22621）
+
+| 场景 | 帧率 | 丢帧 | CPU |
+| --- | --- | --- | --- |
+| 1440p60 全屏动态 | 60 | 0 | 1.2% |
+| 1440p30 全屏动态 | 30 | 0 | 0.2% |
+| 1080p60 区域动态 | 60 | 0 | 0.6% |
+| 1440p60 强制软编 | 60 | 0 | 8.9% |
+
+CPU 口径：进程 CPU 时间 ÷ 墙钟时间，1.2% = 0.012 个核。
+
+### 11.5 验证方法
+
+抽帧**不要用 `ffmpeg -ss`**：非 faststart 的 MP4（moov 在末尾）会 seek 错，
+稳定抽出黑图，一度误判成"编码管线坏了"。用
+`-vf "select=eq(n\,120)"` 按帧号取，再用 `-vsync 0` 落盘。
+
+### 11.6 会话与 UI（`record/session.rs`）
+
+- 录制跑在独立线程，主线程只做开录、每秒刷托盘、停止时 join。60fps 循环
+  放主线程会把热键和托盘全堵死。
+- 录制中再按一次全局热键是"停止"，不是重新截图。`WM_HOTKEY` 和托盘菜单
+  两条路径都要判 `session::is_recording()`。
+- 红框是 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` 的分层窗口，
+  画在选区**外面** 3px。位置在选区外，所以不会被 DDA 录进去。
+- 控制条是另一个 layered 窗口，**不穿透**——它要接收点击。位置固定在选区
+  水平居中、距底边 24px，并用 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`
+  从捕获里排除。实测 DDA 下被排除的窗口区域显示的是**窗口后面的内容**，
+  不是黑块，所以全屏录制也不会穿帮。
+- `WDA_EXCLUDEFROMCAPTURE` 要 Win10 2004+。老系统调用返回 0，这时控制条
+  回退到"选区上方 → 下方 → 屏幕底边"，宁可挡在选区外面也不污染录像。
+- 副作用：系统截图（Win+Shift+S）和其他录屏软件同样看不到控制条，这是 API
+  的设计，不是 bug。调试时用 PIL 的 `ImageGrab` 也截不到它，别误判成"没画出来"。
+- 控制条上的颜色必须走 `rgb(r,g,b)`（COLORREF）。直接传红框用的
+  `0x00FF2E63` 这种写像素常量，会被 `fill_round` 里的 `argb()` 再转一次，
+  玫红变紫（R/B 对调）。
+- 倒计时用遮罩自己的 `SetTimer`，不另开线程；倒计时结束才 `finish(CMD_RECORD)`，
+  这时遮罩已经关掉，录到的是干净桌面。
+- 录制不产出 `RgbaImage`：`finish(CMD_RECORD)` 只记 `PENDING_RECT`，
+  省掉一次整块裁剪和 8MB 中转。
+- 不足 1 秒的录制直接删文件；线程报错也删，绝不留半截 MP4。
+
+### 11.7 保存位置与另存为
+
+- 默认落 `Config::video_dir()`：配置了就用配置，否则 Videos → Desktop → 临时目录。
+- 勾了"录完询问另存为"时，录制先写 `%TEMP%\rec_SmartPaste_*.mp4`，
+  停止后主线程弹 `savedlg::ask_video`，同盘 `rename`、跨盘退化成 `copy`；
+  用户取消就删临时文件。
+- `SHBrowseForFolderW` 在 `windows-sys` 0.59 里没有导出，选目录和打开目录都走
+  `src/explorer.rs`（`windows` crate）。别在 settings 里直接用 windows-sys 找它。
+
+### 11.8 模拟点击测试：先设 DPI 感知
+
+非 DPI-aware 的脚本里 `SetCursorPos(811, 839)` 在 125% 缩放下会落到物理
+`(1014, 1049)`，表现为"点了没反应"。脚本开头必须
+`ctypes.windll.user32.SetProcessDPIAware()`，之后所有坐标都是物理像素。
+`GetWindowRect` 的返回值也会跟着变，别混用两套坐标。
+
+坐标也别从截图目测。按布局常量算：设置窗口客户区原点等于窗口左上角
+（`WM_NCCALCSIZE` 返回 0），所有 `ui(378)` 这类值直接加窗口偏移即可。
+目测过一次差了 90px，凭空多排查了半小时。
+
+

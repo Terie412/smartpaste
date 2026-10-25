@@ -25,6 +25,14 @@ pub struct Config {
     pub styles: [Option<String>; 5],
     /// 上次"另存为"选的目录，下次直接打开这里
     pub save_dir: Option<String>,
+    /// 录屏帧率，只允许 30 / 60
+    pub record_fps: u32,
+    /// 点录制后倒计时几秒，0 = 立即开始
+    pub record_countdown: u32,
+    /// 录像保存目录，空则用系统 Videos
+    pub video_dir: Option<String>,
+    /// 录完是否弹"另存为"。false = 直接落到 video_dir
+    pub video_ask_save: bool,
 }
 
 impl Default for Config {
@@ -34,6 +42,28 @@ impl Default for Config {
             hotkey_vk: DEFAULT_VK,
             styles: [None, None, None, None, None],
             save_dir: None,
+            record_fps: 60,
+            record_countdown: 3,
+            video_dir: None,
+            video_ask_save: false,
+        }
+    }
+}
+
+impl Config {
+    /// 录像目录。没配置就按 Videos → Desktop → 临时目录兜底。
+    pub fn video_dir(&self) -> PathBuf {
+        if let Some(d) = &self.video_dir {
+            return PathBuf::from(d);
+        }
+        let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) else {
+            return std::env::temp_dir();
+        };
+        let videos = home.join("Videos");
+        if videos.is_dir() {
+            videos
+        } else {
+            home.join("Desktop")
         }
     }
 }
@@ -80,6 +110,30 @@ impl Config {
                         cfg.save_dir = Some(v.to_string());
                     }
                 }
+                "record_fps" => {
+                    if let Ok(n) = v.trim().parse::<u32>() {
+                        if n == 30 || n == 60 {
+                            cfg.record_fps = n;
+                        }
+                    }
+                }
+                "record_countdown" => {
+                    if let Ok(n) = v.trim().parse::<u32>() {
+                        if n <= 10 {
+                            cfg.record_countdown = n;
+                        }
+                    }
+                }
+                "video_dir" => {
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        cfg.video_dir = Some(v.to_string());
+                    }
+                }
+                "video_ask_save" => {
+                    let v = v.trim();
+                    cfg.video_ask_save = v == "1" || v.eq_ignore_ascii_case("true");
+                }
                 k if k.starts_with("style.") => {
                     if let Ok(i) = k["style.".len()..].parse::<usize>() {
                         if i < 5 {
@@ -108,6 +162,17 @@ impl Config {
         if let Some(d) = &self.save_dir {
             text.push_str(&format!("save_dir={d}\n"));
         }
+        text.push_str(&format!(
+            "record_fps={}\nrecord_countdown={}\n",
+            self.record_fps, self.record_countdown
+        ));
+        if let Some(d) = &self.video_dir {
+            text.push_str(&format!("video_dir={d}\n"));
+        }
+        text.push_str(&format!(
+            "video_ask_save={}\n",
+            if self.video_ask_save { 1 } else { 0 }
+        ));
         text.push_str("; 每个工具的样式：RRGGBB,线宽,标志位\n");
         for (i, s) in self.styles.iter().enumerate() {
             if let Some(v) = s {
