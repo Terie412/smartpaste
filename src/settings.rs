@@ -66,44 +66,53 @@ const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
-// ---- 色板：暖灰底 + 墨绿主色，快捷键区域用深绿形成视觉锚点 ----
-const BG: u32 = rgb(0xF4, 0xF5, 0xF2);
-const DIVIDER: u32 = rgb(0xDD, 0xE2, 0xDC);
+// ---- 色板：直接取自应用图标 ----
+// 图标是玫红底 + 左上金黄 + 右下天青。界面只用玫红一种强调色，而且大块面
+// 就是图标原色 #FF2E63，不再压深——压深会在视觉上和图标对不上。
+// 只有两种场合要换档：浅底上的小字（原色对比度不够），以及亮粉块上的深色块。
+// 金黄只做「正在录制」的描边和顶部色带，天青只出现在色带里。
+const ROSE: u32 = rgb(0xFF, 0x2E, 0x63); // 图标主色
+const YELLOW: u32 = rgb(0xFF, 0xC3, 0x00);
+const CYAN: u32 = rgb(0x00, 0xC8, 0xFF);
 
-const TXT_1: u32 = rgb(0x20, 0x27, 0x22); // 主文字
-const TXT_2: u32 = rgb(0x62, 0x6D, 0x66); // 次文字
-const TXT_3: u32 = rgb(0x89, 0x91, 0x8B); // 辅助文字
+const BG: u32 = rgb(0xFA, 0xF7, 0xF8);
+const DIVIDER: u32 = rgb(0xEE, 0xE3, 0xE7);
 
-const ACCENT: u32 = rgb(0x2F, 0x6B, 0x5A);
-const ON_ACCENT: u32 = rgb(0xF5, 0xF8, 0xF4);
+const TXT_1: u32 = rgb(0x22, 0x1A, 0x1D); // 主文字
+const TXT_2: u32 = rgb(0x6B, 0x5E, 0x63); // 次文字
+const TXT_3: u32 = rgb(0x96, 0x89, 0x8E); // 辅助文字
 
-const HERO_BG: u32 = rgb(0x21, 0x33, 0x2D);
-const HERO_HOVER: u32 = rgb(0x2D, 0x45, 0x3D);
-const HERO_TXT: u32 = rgb(0xF2, 0xF5, 0xF0);
-const HERO_MUTED: u32 = rgb(0xA9, 0xB8, 0xB0);
-const HERO_ACCENT: u32 = rgb(0xA8, 0xD9, 0xC5);
-const HERO_OFF: u32 = rgb(0x64, 0x77, 0x6E);
+const ACCENT: u32 = ROSE; // 深色主区、选中项填充
+/// 同色系压一档：浅底上的 12px 分节标题，以及亮粉块里的胶囊底。
+const ACCENT_DEEP: u32 = rgb(0xD9, 0x0A, 0x42);
+const ON_ACCENT: u32 = rgb(0xFF, 0xFF, 0xFF);
 
-const KEY_BG: u32 = rgb(0xFB, 0xFC, 0xF9);
-const KEY_BG_HOVER: u32 = rgb(0xEA, 0xF1, 0xEC);
-const KEY_BORDER: u32 = rgb(0xD4, 0xDC, 0xD5);
-const KEY_BORDER_HOVER: u32 = rgb(0x9D, 0xB8, 0xAA);
-const KEY_TXT: u32 = rgb(0x26, 0x33, 0x2D);
-const PLUS: u32 = rgb(0x93, 0xA6, 0x9C);
-const HOVER_BG: u32 = rgb(0xE7, 0xEB, 0xE6);
-const SEGMENT_BG: u32 = rgb(0xE7, 0xEB, 0xE6);
+const HERO_BG: u32 = ACCENT;
+const HERO_HOVER: u32 = ACCENT_DEEP;
+const HERO_TXT: u32 = rgb(0xFF, 0xFF, 0xFF);
+const HERO_MUTED: u32 = rgb(0xFF, 0xF0, 0xF4);
+const HERO_ACCENT: u32 = YELLOW;
+const HERO_OFF: u32 = rgb(0xFF, 0x9F, 0xBA);
+
+const KEY_BG: u32 = rgb(0xFF, 0xFF, 0xFF);
+const KEY_BG_HOVER: u32 = rgb(0xFF, 0xE9, 0xEF);
+const KEY_BORDER: u32 = rgb(0xEC, 0xDA, 0xE0);
+const KEY_BORDER_HOVER: u32 = ROSE;
+const KEY_TXT: u32 = rgb(0x2A, 0x1A, 0x20);
+const PLUS: u32 = rgb(0xFF, 0xC6, 0xD6);
+const HOVER_BG: u32 = rgb(0xF6, 0xEC, 0xEF);
+const SEGMENT_BG: u32 = rgb(0xF1, 0xE7, 0xEA);
 
 /// 描边宽度要跟着缩放走。写死 1px 的话，16px 半径的圆角上会断成一节一节。
 const HAIRLINE: f32 = 1.6;
 
 // ---- 布局 ----
 const W: i32 = ui(480);
-const H: i32 = ui(544);
+const H: i32 = ui(598);
 
 const HEADER_H: i32 = ui(66);
 const PAD: i32 = ui(28);
 const CLOSE: i32 = ui(32);
-const LOGO: i32 = ui(34);
 const CR: i32 = W - PAD;
 
 // 截图快捷键是主操作，独占一个深色区域；其余设置用留白和分隔线分组。
@@ -124,7 +133,9 @@ const SAVE_HEAD_Y: i32 = ui(360);
 const SAVE_CY: i32 = ui(400);
 const DIV_SAVE_Y: i32 = ui(427);
 const ASK_CY: i32 = ui(454);
-const FOOTER_Y: i32 = ui(520);
+const DIV_OPEN_Y: i32 = ui(481);
+const OPEN_CY: i32 = ui(508);
+const FOOTER_Y: i32 = ui(574);
 
 const KEY_H: i32 = ui(36);
 const KEY_GAP: i32 = ui(20);
@@ -163,6 +174,8 @@ struct State {
     dir_open: RECT,
     ask_yes: RECT,
     ask_no: RECT,
+    open_yes: RECT,
+    open_no: RECT,
     hand: HCURSOR,
 
     f_title: FontSpec,
@@ -288,6 +301,8 @@ pub fn open(parent: HWND) {
             dir_open: rect(0, 0, 0, 0),
             ask_yes: rect(0, 0, 0, 0),
             ask_no: rect(0, 0, 0, 0),
+            open_yes: rect(0, 0, 0, 0),
+            open_no: rect(0, 0, 0, 0),
             hand: LoadCursorW(std::ptr::null_mut(), IDC_HAND),
 
             f_title: FontSpec::new(ui(24) as f32, true, "Microsoft YaHei"),
@@ -446,6 +461,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 } else if pt_in(&s.ask_no, x, y) {
                     if s.cfg.video_ask_save {
                         s.cfg.video_ask_save = false;
+                        s.cfg.save();
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                } else if pt_in(&s.open_yes, x, y) {
+                    if !s.cfg.video_open_dir {
+                        s.cfg.video_open_dir = true;
+                        s.cfg.save();
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                } else if pt_in(&s.open_no, x, y) {
+                    if s.cfg.video_open_dir {
+                        s.cfg.video_open_dir = false;
                         s.cfg.save();
                         InvalidateRect(hwnd, std::ptr::null(), 0);
                     }
@@ -727,26 +754,17 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     solid(hdc, rc, BG);
     SetBkMode(hdc, TRANSPARENT as i32);
 
-    // ---- 自绘标题栏：重叠窗口图形对应截图与钉图 ----
-    let logo = rect(PAD, ui(16), PAD + LOGO, ui(16) + LOGO);
-    crate::gdiplus::fill_round(hdc, &logo, ui(10) as f32, ACCENT);
-    let back = rect(
-        logo.left + ui(9),
-        logo.top + ui(7),
-        logo.left + ui(23),
-        logo.top + ui(20),
-    );
-    crate::gdiplus::stroke_round(hdc, &back, ui(2) as f32, HERO_TXT, HAIRLINE);
-    let front = rect(
-        logo.left + ui(14),
-        logo.top + ui(13),
-        logo.left + ui(28),
-        logo.top + ui(27),
-    );
-    crate::gdiplus::fill_round(hdc, &front, ui(2) as f32, KEY_BG);
+    // ---- 自绘标题栏 ----
+    // 顶上一条三色带，就是图标的那三种颜色，用它代替编造出来的 logo 图形。
+    let band_h = ui(4);
+    let b1 = (W as f32 * 0.52) as i32;
+    let b2 = (W as f32 * 0.80) as i32;
+    crate::gdiplus::rect_fill(hdc, &rect(0, 0, b1, band_h), ROSE);
+    crate::gdiplus::rect_fill(hdc, &rect(b1, 0, b2, band_h), YELLOW);
+    crate::gdiplus::rect_fill(hdc, &rect(b2, 0, W, band_h), CYAN);
 
-    text(hdc, s.f_title, TXT_1, PAD + ui(46), ui(11), "设置");
-    text(hdc, s.f_brand, TXT_3, PAD + ui(47), ui(42), "SMARTPASTE");
+    text(hdc, s.f_title, TXT_1, PAD, ui(14), "设置");
+    text(hdc, s.f_brand, TXT_3, PAD + ui(1), ui(45), "SMARTPASTE");
 
     let close = close_rect();
     if s.hover_close {
@@ -764,7 +782,7 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     text(hdc, s.f_h1, HERO_TXT, HOT_CX, HOT_TITLE_Y, "截图快捷键");
 
     let (desc, desc_color) = if s.recording {
-        ("按下组合键，Esc 取消", HERO_ACCENT)
+        ("按下组合键，Esc 取消", HERO_TXT)
     } else {
         ("点击键帽后按下新的组合键", HERO_MUTED)
     };
@@ -790,7 +808,7 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     } else if s.hover_reset {
         HERO_TXT
     } else {
-        HERO_ACCENT
+        HERO_MUTED
     };
     text_at(
         hdc,
@@ -817,7 +835,7 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
         text_at(
             hdc,
             s.f_action,
-            HERO_ACCENT,
+            HERO_TXT,
             (pill.left + pill.right) / 2,
             HOT_KEY_CY,
             "正在等待输入…",
@@ -828,7 +846,7 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     }
 
     // ---- 录制设置：用分节和细分隔线代替重复卡片 ----
-    text(hdc, s.f_action, ACCENT, PAD, RECORD_HEAD_Y, "录制");
+    text(hdc, s.f_action, ACCENT_DEEP, PAD, RECORD_HEAD_Y, "录制");
 
     let (_, row_title_h) = measure(hdc, s.f_h1, "录制帧率");
     let (_, row_body_h) = measure(hdc, s.f_body, "60 更流畅");
@@ -872,7 +890,7 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     draw_chip(hdc, &cd3, "3 秒", s.cfg.record_countdown == 3, s.f_body);
 
     // ---- 保存设置 ----
-    text(hdc, s.f_action, ACCENT, PAD, SAVE_HEAD_Y, "保存");
+    text(hdc, s.f_action, ACCENT_DEEP, PAD, SAVE_HEAD_Y, "保存");
 
     let top = SAVE_CY - (row_title_h + row_body_h) / 2;
     text(hdc, s.f_h1, TXT_1, PAD, top, "保存位置");
@@ -922,6 +940,26 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     draw_segment_track(hdc, &ask_yes, &ask_no);
     draw_chip(hdc, &ask_yes, "是", s.cfg.video_ask_save, s.f_body);
     draw_chip(hdc, &ask_no, "否", !s.cfg.video_ask_save, s.f_body);
+
+    solid(hdc, &rect(PAD, DIV_OPEN_Y, CR, DIV_OPEN_Y + 1), DIVIDER);
+
+    let top = OPEN_CY - (row_title_h + row_body_h) / 2;
+    text(hdc, s.f_h1, TXT_1, PAD, top, "录完打开目录");
+    text(
+        hdc,
+        s.f_body,
+        TXT_2,
+        PAD,
+        top + row_title_h,
+        "在资源管理器里定位到刚录的文件",
+    );
+
+    let (open_yes, open_no) = segment_rects(hdc, CR, OPEN_CY, "是", "否", s.f_body);
+    s.open_yes = open_yes;
+    s.open_no = open_no;
+    draw_segment_track(hdc, &open_yes, &open_no);
+    draw_chip(hdc, &open_yes, "是", s.cfg.video_open_dir, s.f_body);
+    draw_chip(hdc, &open_no, "否", !s.cfg.video_open_dir, s.f_body);
 
     // ---- 页脚说明 ----
     let footer = "组合键被其他程序占用时会自动还原。";

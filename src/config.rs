@@ -33,6 +33,8 @@ pub struct Config {
     pub video_dir: Option<String>,
     /// 录完是否弹"另存为"。false = 直接落到 video_dir
     pub video_ask_save: bool,
+    /// 录完是否用资源管理器打开刚才保存视频的目录
+    pub video_open_dir: bool,
 }
 
 impl Default for Config {
@@ -46,6 +48,7 @@ impl Default for Config {
             record_countdown: 3,
             video_dir: None,
             video_ask_save: false,
+            video_open_dir: true,
         }
     }
 }
@@ -134,6 +137,10 @@ impl Config {
                     let v = v.trim();
                     cfg.video_ask_save = v == "1" || v.eq_ignore_ascii_case("true");
                 }
+                "video_open_dir" => {
+                    let v = v.trim();
+                    cfg.video_open_dir = v == "1" || v.eq_ignore_ascii_case("true");
+                }
                 k if k.starts_with("style.") => {
                     if let Ok(i) = k["style.".len()..].parse::<usize>() {
                         if i < 5 {
@@ -172,6 +179,10 @@ impl Config {
         text.push_str(&format!(
             "video_ask_save={}\n",
             if self.video_ask_save { 1 } else { 0 }
+        ));
+        text.push_str(&format!(
+            "video_open_dir={}\n",
+            if self.video_open_dir { 1 } else { 0 }
         ));
         text.push_str("; 每个工具的样式：RRGGBB,线宽,标志位\n");
         for (i, s) in self.styles.iter().enumerate() {

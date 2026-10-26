@@ -53,3 +53,19 @@ pub fn open_dir(path: &str) {
         );
     }
 }
+
+/// 打开文件所在目录并选中它。`ShellExecuteW` 没有"选中"这个动作，
+/// 得靠 `explorer.exe /select,` 这条老规矩。
+pub fn reveal(path: &str) {
+    if std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{path}"))
+        .spawn()
+        .is_ok()
+    {
+        return;
+    }
+    // 文件路径异常时至少把目录打开
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        open_dir(&dir.display().to_string());
+    }
+}

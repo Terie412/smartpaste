@@ -386,6 +386,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                         record_countdown: cfg.record_countdown,
                         video_dir: cfg.video_dir.clone(),
                         video_ask_save: cfg.video_ask_save,
+                        video_open_dir: cfg.video_open_dir,
                     }
                     .save();
                     win::trace(&format!(
@@ -400,6 +401,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                             record_countdown: cfg.record_countdown,
                             video_dir: cfg.video_dir.clone(),
                             video_ask_save: cfg.video_ask_save,
+                            video_open_dir: cfg.video_open_dir,
                         }
                         .hotkey_text(),
                         back
@@ -625,12 +627,18 @@ fn report(hwnd: HWND, out: session::Outcome) {
                         &format!("已保存到 {}", dest.display()),
                         false,
                     );
+                    if cfg.video_open_dir {
+                        crate::explorer::reveal(&dest.display().to_string());
+                    }
                 } else {
                     toast(hwnd, "保存失败", "无法写入所选位置", true);
                 }
                 return;
             }
 
+            if config::Config::load().video_open_dir {
+                crate::explorer::reveal(&r.path);
+            }
             let name = std::path::Path::new(&r.path)
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
