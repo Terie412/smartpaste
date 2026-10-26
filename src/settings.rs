@@ -15,8 +15,9 @@ use crate::gdiplus::FontSpec;
 use crate::win::{hinstance, pt_in, rect, to_wide};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, ScreenToClient,
-    SetBkMode, HDC, HGDIOBJ, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
+    DeleteObject, EndPaint, FillRect, InvalidateRect, ScreenToClient, SelectObject, SetBkMode, HDC,
+    HGDIOBJ, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE,
@@ -25,8 +26,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, LoadCursorW,
     PostMessageW, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow,
     CS_HREDRAW, CS_VREDRAW, HCURSOR, HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, SM_CXSCREEN,
-    SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
-    WM_APP,
+    SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WM_APP,
     WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCALCSIZE,
     WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION,
     WS_EX_TOOLWINDOW, WS_OVERLAPPED, WS_SYSMENU,
@@ -66,62 +66,69 @@ const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
-// ---- 色板：中性灰，只有录制态用产品玫红 ----
-const BG: u32 = rgb(0xF7, 0xF7, 0xF9);
-const CARD_BG: u32 = rgb(0xFF, 0xFF, 0xFF);
-const CARD_BORDER: u32 = rgb(0xE6, 0xE6, 0xEC);
-const DIVIDER: u32 = rgb(0xEF, 0xEF, 0xF3);
+// ---- 色板：暖灰底 + 墨绿主色，快捷键区域用深绿形成视觉锚点 ----
+const BG: u32 = rgb(0xF4, 0xF5, 0xF2);
+const DIVIDER: u32 = rgb(0xDD, 0xE2, 0xDC);
 
-const TXT_1: u32 = rgb(0x1A, 0x1A, 0x20); // 主文字
-const TXT_2: u32 = rgb(0x6E, 0x6E, 0x78); // 次文字
-const TXT_3: u32 = rgb(0x9A, 0x9A, 0xA4); // 辅助文字
-const TXT_OFF: u32 = rgb(0xC2, 0xC2, 0xCB); // 不可用
+const TXT_1: u32 = rgb(0x20, 0x27, 0x22); // 主文字
+const TXT_2: u32 = rgb(0x62, 0x6D, 0x66); // 次文字
+const TXT_3: u32 = rgb(0x89, 0x91, 0x8B); // 辅助文字
 
-const ACCENT: u32 = rgb(0xFF, 0x2E, 0x63);
-const ACCENT_BG: u32 = rgb(0xFF, 0xF2, 0xF6);
+const ACCENT: u32 = rgb(0x2F, 0x6B, 0x5A);
+const ON_ACCENT: u32 = rgb(0xF5, 0xF8, 0xF4);
 
-const KEY_BG: u32 = rgb(0xFB, 0xFB, 0xFD);
-const KEY_BG_HOVER: u32 = rgb(0xF2, 0xF2, 0xF6);
-const KEY_BORDER: u32 = rgb(0xDE, 0xDE, 0xE5);
-const KEY_BORDER_HOVER: u32 = rgb(0xC9, 0xC9, 0xD4);
-const KEY_TXT: u32 = rgb(0x33, 0x33, 0x3C);
-const PLUS: u32 = rgb(0xA6, 0xA6, 0xB0);
-const HOVER_BG: u32 = rgb(0xEF, 0xEF, 0xF4);
+const HERO_BG: u32 = rgb(0x21, 0x33, 0x2D);
+const HERO_HOVER: u32 = rgb(0x2D, 0x45, 0x3D);
+const HERO_TXT: u32 = rgb(0xF2, 0xF5, 0xF0);
+const HERO_MUTED: u32 = rgb(0xA9, 0xB8, 0xB0);
+const HERO_ACCENT: u32 = rgb(0xA8, 0xD9, 0xC5);
+const HERO_OFF: u32 = rgb(0x64, 0x77, 0x6E);
+
+const KEY_BG: u32 = rgb(0xFB, 0xFC, 0xF9);
+const KEY_BG_HOVER: u32 = rgb(0xEA, 0xF1, 0xEC);
+const KEY_BORDER: u32 = rgb(0xD4, 0xDC, 0xD5);
+const KEY_BORDER_HOVER: u32 = rgb(0x9D, 0xB8, 0xAA);
+const KEY_TXT: u32 = rgb(0x26, 0x33, 0x2D);
+const PLUS: u32 = rgb(0x93, 0xA6, 0x9C);
+const HOVER_BG: u32 = rgb(0xE7, 0xEB, 0xE6);
+const SEGMENT_BG: u32 = rgb(0xE7, 0xEB, 0xE6);
 
 /// 描边宽度要跟着缩放走。写死 1px 的话，16px 半径的圆角上会断成一节一节。
 const HAIRLINE: f32 = 1.6;
 
 // ---- 布局 ----
-const W: i32 = ui(440);
-const H: i32 = ui(520);
+const W: i32 = ui(480);
+const H: i32 = ui(544);
 
-const HEADER_H: i32 = ui(44);
-const PAD: i32 = ui(20);
-const CLOSE: i32 = ui(30);
+const HEADER_H: i32 = ui(66);
+const PAD: i32 = ui(28);
+const CLOSE: i32 = ui(32);
+const LOGO: i32 = ui(34);
+const CR: i32 = W - PAD;
 
-const CARD: RECT = rect(PAD, ui(64), W - PAD, ui(208));
-const CX: i32 = PAD + ui(18); // 卡片内容左边界
-const CR: i32 = W - PAD - ui(18); // 卡片内容右边界
+// 截图快捷键是主操作，独占一个深色区域；其余设置用留白和分隔线分组。
+const HOT_CARD: RECT = rect(PAD, ui(76), W - PAD, ui(204));
+const HOT_CX: i32 = PAD + ui(20);
+const HOT_CR: i32 = W - PAD - ui(20);
+const HOT_TITLE_Y: i32 = ui(88);
+const HOT_DESC_Y: i32 = ui(109);
+const HOT_KEY_CY: i32 = ui(166);
+const RESET_CY: i32 = ui(98);
 
-const ROW1_CY: i32 = ui(107);
-const DIVIDER_Y: i32 = ui(151);
-const ROW2_CY: i32 = ui(180);
+const RECORD_HEAD_Y: i32 = ui(222);
+const FPS_CY: i32 = ui(266);
+const DIV_RECORD_Y: i32 = ui(293);
+const CD_CY: i32 = ui(320);
 
-// 第二张卡片：录制设置
-const CARD2: RECT = rect(PAD, ui(220), W - PAD, ui(336));
-const FPS_CY: i32 = ui(258);
-const DIV2_Y: i32 = ui(287);
-const CD_CY: i32 = ui(316);
+const SAVE_HEAD_Y: i32 = ui(360);
+const SAVE_CY: i32 = ui(400);
+const DIV_SAVE_Y: i32 = ui(427);
+const ASK_CY: i32 = ui(454);
+const FOOTER_Y: i32 = ui(520);
 
-// 第三张卡片：保存
-const CARD3: RECT = rect(PAD, ui(348), W - PAD, ui(484));
-const SAVE_CY: i32 = ui(378);
-const DIV3_Y: i32 = ui(418);
-const ASK_CY: i32 = ui(450);
-
-const KEY_H: i32 = ui(32);
+const KEY_H: i32 = ui(36);
 const KEY_GAP: i32 = ui(20);
-const KEY_PAD_X: i32 = ui(10);
+const KEY_PAD_X: i32 = ui(12);
 
 const fn close_rect() -> RECT {
     rect(
@@ -159,11 +166,11 @@ struct State {
     hand: HCURSOR,
 
     f_title: FontSpec,
+    f_brand: FontSpec,
     f_h1: FontSpec,
     f_body: FontSpec,
     f_key: FontSpec,
     f_plus: FontSpec,
-    f_link: FontSpec,
     f_action: FontSpec,
 }
 
@@ -283,13 +290,13 @@ pub fn open(parent: HWND) {
             ask_no: rect(0, 0, 0, 0),
             hand: LoadCursorW(std::ptr::null_mut(), IDC_HAND),
 
-            f_title: FontSpec::new(ui(15) as f32, true, "Microsoft YaHei"),
+            f_title: FontSpec::new(ui(24) as f32, true, "Microsoft YaHei"),
+            f_brand: FontSpec::new(ui(10) as f32, true, "Segoe UI"),
             f_h1: FontSpec::new(ui(14) as f32, true, "Microsoft YaHei"),
             f_body: FontSpec::new(ui(12) as f32, false, "Microsoft YaHei"),
-            f_key: FontSpec::new(ui(14) as f32, true, "Segoe UI"),
-            f_plus: FontSpec::new(ui(14) as f32, false, "Segoe UI"),
-            f_link: FontSpec::new(ui(13) as f32, false, "Microsoft YaHei"),
-            f_action: FontSpec::new(ui(13) as f32, true, "Microsoft YaHei"),
+            f_key: FontSpec::new(ui(15) as f32, true, "Segoe UI"),
+            f_plus: FontSpec::new(ui(13) as f32, false, "Segoe UI"),
+            f_action: FontSpec::new(ui(12) as f32, true, "Microsoft YaHei"),
         }));
 
         ShowWindow(hwnd, SW_SHOW);
@@ -553,7 +560,14 @@ unsafe fn text_at(dc: HDC, font: FontSpec, color: u32, cx: i32, cy: i32, s: &str
 unsafe fn draw_button(dc: HDC, r: &RECT, label: &str, font: FontSpec) {
     crate::gdiplus::fill_round(dc, r, ui(8) as f32, KEY_BG);
     crate::gdiplus::stroke_round(dc, r, ui(8) as f32, KEY_BORDER, HAIRLINE);
-    text_at(dc, font, TXT_2, (r.left + r.right) / 2, (r.top + r.bottom) / 2, label);
+    text_at(
+        dc,
+        font,
+        TXT_1,
+        (r.left + r.right) / 2,
+        (r.top + r.bottom) / 2,
+        label,
+    );
 }
 
 /// 路径太长时从中间省略，保留盘符和末级目录。
@@ -570,17 +584,51 @@ fn ellipsize(s: &str, max: usize) -> String {
     out
 }
 
-/// 二选一的胶囊按钮：选中态用玫红底 + 玫红字。
+/// 计算一组二选一分段控件的矩形，两个选项等宽。
+unsafe fn segment_rects(
+    dc: HDC,
+    right: i32,
+    cy: i32,
+    left_label: &str,
+    right_label: &str,
+    font: FontSpec,
+) -> (RECT, RECT) {
+    let w = measure(dc, font, left_label)
+        .0
+        .max(measure(dc, font, right_label).0)
+        + ui(24);
+    let h = ui(34);
+    let gap = ui(4);
+    let right_rect = rect(right - w, cy - h / 2, right, cy + h / 2);
+    let left_rect = rect(right - w * 2 - gap, cy - h / 2, right - w - gap, cy + h / 2);
+    (left_rect, right_rect)
+}
+
+/// 分段控件共用一个浅底轨道，选中项是实心墨绿，不再各自描边。
+unsafe fn draw_segment_track(dc: HDC, left: &RECT, right: &RECT) {
+    let pad = ui(3);
+    let track = rect(
+        left.left - pad,
+        left.top - pad,
+        right.right + pad,
+        right.bottom + pad,
+    );
+    crate::gdiplus::fill_round(dc, &track, ui(10) as f32, SEGMENT_BG);
+}
+
 unsafe fn draw_chip(dc: HDC, r: &RECT, label: &str, active: bool, font: FontSpec) {
     if active {
-        crate::gdiplus::fill_round(dc, r, ui(8) as f32, ACCENT_BG);
-        crate::gdiplus::stroke_round(dc, r, ui(8) as f32, ACCENT, HAIRLINE);
-    } else {
-        crate::gdiplus::fill_round(dc, r, ui(8) as f32, KEY_BG);
-        crate::gdiplus::stroke_round(dc, r, ui(8) as f32, KEY_BORDER, HAIRLINE);
+        crate::gdiplus::fill_round(dc, r, ui(8) as f32, ACCENT);
     }
-    let color = if active { ACCENT } else { TXT_2 };
-    text_at(dc, font, color, (r.left + r.right) / 2, (r.top + r.bottom) / 2, label);
+    let color = if active { ON_ACCENT } else { TXT_2 };
+    text_at(
+        dc,
+        font,
+        color,
+        (r.left + r.right) / 2,
+        (r.top + r.bottom) / 2,
+        label,
+    );
 }
 
 /// 按给定内边距算出每个键帽的宽度和总宽
@@ -595,10 +643,8 @@ unsafe fn key_widths(dc: HDC, font: FontSpec, parts: &[String], pad: i32) -> (Ve
     (widths, total)
 }
 
-/// 键帽组，右对齐到卡片内容右边界；返回用于点击判定的外扩矩形。
-///
-/// `avail` 是右侧能用的宽度。Ctrl+Shift+Alt+A 这种四键组合比三键宽 60px，
-/// 会和左边的说明文字撞上，所以装不下时先把内边距和间距各收一档。
+/// 键帽组在深色区域底部居中；返回用于点击判定的外扩矩形。
+/// 组合较长时先压缩键帽内边距和间距，避免超出内容区域。
 unsafe fn draw_keycaps(s: &State, dc: HDC, avail: i32) -> RECT {
     let parts = hotkey_parts(s.cfg.hotkey_mod, s.cfg.hotkey_vk);
 
@@ -612,42 +658,95 @@ unsafe fn draw_keycaps(s: &State, dc: HDC, avail: i32) -> RECT {
         total = t + gap * (parts.len() as i32 - 1);
     }
 
-    let top = ROW1_CY - KEY_H / 2;
+    let top = HOT_KEY_CY - KEY_H / 2;
     let (bg, border) = if s.hover_hot {
         (KEY_BG_HOVER, KEY_BORDER_HOVER)
     } else {
         (KEY_BG, KEY_BORDER)
     };
 
-    let mut x = CR - total;
+    let left = HOT_CX + (avail - total).max(0) / 2;
+    let mut x = left;
     for (i, p) in parts.iter().enumerate() {
         let r = rect(x, top, x + widths[i], top + KEY_H);
-        crate::gdiplus::fill_round(dc, &r, ui(7) as f32, bg);
-        crate::gdiplus::stroke_round(dc, &r, ui(7) as f32, border, HAIRLINE);
-        text_at(dc, s.f_key, KEY_TXT, (r.left + r.right) / 2, ROW1_CY, p);
+        crate::gdiplus::fill_round(dc, &r, ui(8) as f32, bg);
+        crate::gdiplus::stroke_round(dc, &r, ui(8) as f32, border, HAIRLINE);
+        text_at(dc, s.f_key, KEY_TXT, (r.left + r.right) / 2, HOT_KEY_CY, p);
 
         x += widths[i];
         if i + 1 < parts.len() {
-            text_at(dc, s.f_plus, PLUS, x + gap / 2, ROW1_CY, "+");
+            text_at(dc, s.f_plus, PLUS, x + gap / 2, HOT_KEY_CY, "+");
             x += gap;
         }
     }
 
-    expand(&rect(CR - total, top, CR, top + KEY_H), ui(8))
+    expand(&rect(left, top, left + total, top + KEY_H), ui(6))
 }
 
+/// 整窗先画到内存位图，再一次性提交。
+///
+/// 直接往窗口 DC 上逐层画时，背景填充和控件之间会出现可见的中间帧。
+/// 旧界面底色与卡片颜色接近，所以不明显；高对比的深色区域会把它放大。
 unsafe fn paint(s: &mut State) {
     let mut ps: PAINTSTRUCT = std::mem::zeroed();
     let hdc = BeginPaint(s.hwnd, &mut ps);
 
     let mut rc: RECT = std::mem::zeroed();
     GetClientRect(s.hwnd, &mut rc);
-    solid(hdc, &rc, BG);
+    let width = rc.right - rc.left;
+    let height = rc.bottom - rc.top;
+
+    if width > 0 && height > 0 {
+        let mem = CreateCompatibleDC(hdc);
+        let bitmap = if mem.is_null() {
+            std::ptr::null_mut()
+        } else {
+            CreateCompatibleBitmap(hdc, width, height)
+        };
+
+        if !mem.is_null() && !bitmap.is_null() {
+            let old = SelectObject(mem, bitmap);
+            paint_content(s, mem, &rc);
+            BitBlt(hdc, 0, 0, width, height, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bitmap as HGDIOBJ);
+            DeleteDC(mem);
+        } else {
+            // 分配失败时宁可退回直接绘制，也不能让窗口空白。
+            if !mem.is_null() {
+                DeleteDC(mem);
+            }
+            paint_content(s, hdc, &rc);
+        }
+    }
+
+    EndPaint(s.hwnd, &ps);
+}
+
+unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
+    solid(hdc, rc, BG);
     SetBkMode(hdc, TRANSPARENT as i32);
 
-    // ---- 自绘标题栏 ----
-    let (_, th) = measure(hdc, s.f_title, "设置");
-    text(hdc, s.f_title, TXT_1, PAD, HEADER_H / 2 - th / 2, "设置");
+    // ---- 自绘标题栏：重叠窗口图形对应截图与钉图 ----
+    let logo = rect(PAD, ui(16), PAD + LOGO, ui(16) + LOGO);
+    crate::gdiplus::fill_round(hdc, &logo, ui(10) as f32, ACCENT);
+    let back = rect(
+        logo.left + ui(9),
+        logo.top + ui(7),
+        logo.left + ui(23),
+        logo.top + ui(20),
+    );
+    crate::gdiplus::stroke_round(hdc, &back, ui(2) as f32, HERO_TXT, HAIRLINE);
+    let front = rect(
+        logo.left + ui(14),
+        logo.top + ui(13),
+        logo.left + ui(28),
+        logo.top + ui(27),
+    );
+    crate::gdiplus::fill_round(hdc, &front, ui(2) as f32, KEY_BG);
+
+    text(hdc, s.f_title, TXT_1, PAD + ui(46), ui(11), "设置");
+    text(hdc, s.f_brand, TXT_3, PAD + ui(47), ui(42), "SMARTPASTE");
 
     let close = close_rect();
     if s.hover_close {
@@ -660,151 +759,186 @@ unsafe fn paint(s: &mut State) {
     crate::gdiplus::line(hdc, cx - d, cy - d, cx + d, cy + d, cross, HAIRLINE);
     crate::gdiplus::line(hdc, cx - d, cy + d, cx + d, cy - d, cross, HAIRLINE);
 
-    // ---- 卡片 ----
-    crate::gdiplus::fill_round(hdc, &CARD, ui(10) as f32, CARD_BG);
-    crate::gdiplus::stroke_round(hdc, &CARD, ui(10) as f32, CARD_BORDER, HAIRLINE);
-
-    // 第一行左侧：标题 + 说明，两行作为一块垂直居中
-    let (_, h1) = measure(hdc, s.f_h1, "截图快捷键");
-    let (_, h2) = measure(hdc, s.f_body, "点击后按下组合键");
-    // GDI+ 的行高里已经含了下沉部分，再额外加间距会显得两行离得远
-    let gap = 0;
-    let top = ROW1_CY - (h1 + gap + h2) / 2;
-    text(hdc, s.f_h1, TXT_1, CX, top, "截图快捷键");
+    // ---- 截图快捷键 ----
+    crate::gdiplus::fill_round(hdc, &HOT_CARD, ui(14) as f32, HERO_BG);
+    text(hdc, s.f_h1, HERO_TXT, HOT_CX, HOT_TITLE_Y, "截图快捷键");
 
     let (desc, desc_color) = if s.recording {
-        ("按下组合键，Esc 取消", ACCENT)
+        ("按下组合键，Esc 取消", HERO_ACCENT)
     } else {
-        ("点击后按下组合键", TXT_2)
+        ("点击键帽后按下新的组合键", HERO_MUTED)
     };
-    text(hdc, s.f_body, desc_color, CX, top + h1 + gap, desc);
+    text(hdc, s.f_body, desc_color, HOT_CX, HOT_DESC_Y, desc);
 
-    // 右侧控件的可用宽度：扣掉左边两行文字和 24px 的安全间距
-    let text_w = measure(hdc, s.f_h1, "截图快捷键")
-        .0
-        .max(measure(hdc, s.f_body, "点击后按下组合键").0);
-    let avail = CR - CX - text_w - ui(24);
+    let default = is_default(&s.cfg);
+    let reset_label = "恢复默认";
+    let (reset_w, _) = measure(hdc, s.f_action, reset_label);
+    let reset_bw = reset_w + ui(18);
+    let reset_bh = ui(28);
+    let reset = rect(
+        HOT_CR - reset_bw,
+        RESET_CY - reset_bh / 2,
+        HOT_CR,
+        RESET_CY + reset_bh / 2,
+    );
+    s.reset_rect = reset;
+    if !default && s.hover_reset {
+        crate::gdiplus::fill_round(hdc, &reset, ui(7) as f32, HERO_HOVER);
+    }
+    let reset_color = if default {
+        HERO_OFF
+    } else if s.hover_reset {
+        HERO_TXT
+    } else {
+        HERO_ACCENT
+    };
+    text_at(
+        hdc,
+        s.f_action,
+        reset_color,
+        (reset.left + reset.right) / 2,
+        RESET_CY,
+        reset_label,
+    );
 
-    // 第一行右侧：键帽，或录制中的胶囊
+    let avail = HOT_CR - HOT_CX;
     if s.recording {
-        let pill = rect(CR - ui(196), ROW1_CY - ui(17), CR, ROW1_CY + ui(17));
-        crate::gdiplus::fill_round(hdc, &pill, ui(9) as f32, ACCENT_BG);
-        crate::gdiplus::stroke_round(hdc, &pill, ui(9) as f32, ACCENT, ui(2) as f32);
+        let pill_w = ui(210);
+        let pill_h = ui(36);
+        let left = HOT_CX + (avail - pill_w) / 2;
+        let pill = rect(
+            left,
+            HOT_KEY_CY - pill_h / 2,
+            left + pill_w,
+            HOT_KEY_CY + pill_h / 2,
+        );
+        crate::gdiplus::fill_round(hdc, &pill, ui(10) as f32, HERO_HOVER);
+        crate::gdiplus::stroke_round(hdc, &pill, ui(10) as f32, HERO_ACCENT, HAIRLINE);
         text_at(
             hdc,
             s.f_action,
-            ACCENT,
+            HERO_ACCENT,
             (pill.left + pill.right) / 2,
-            ROW1_CY,
-            "按下组合键…",
+            HOT_KEY_CY,
+            "正在等待输入…",
         );
-        s.hot_rect = expand(&pill, ui(8));
+        s.hot_rect = expand(&pill, ui(6));
     } else {
         s.hot_rect = draw_keycaps(s, hdc, avail);
     }
 
-    // 分隔线：内缩，不顶到卡片边
-    solid(hdc, &rect(CX, DIVIDER_Y, CR, DIVIDER_Y + 1), DIVIDER);
+    // ---- 录制设置：用分节和细分隔线代替重复卡片 ----
+    text(hdc, s.f_action, ACCENT, PAD, RECORD_HEAD_Y, "录制");
 
-    // 第二行：恢复默认
-    let (_, lh) = measure(hdc, s.f_link, "恢复默认快捷键");
-    text(hdc, s.f_link, TXT_2, CX, ROW2_CY - lh / 2, "恢复默认快捷键");
+    let (_, row_title_h) = measure(hdc, s.f_h1, "录制帧率");
+    let (_, row_body_h) = measure(hdc, s.f_body, "60 更流畅");
 
-    let default = is_default(&s.cfg);
-    let label = "恢复";
-    let (tw, _) = measure(hdc, s.f_action, label);
-    let bw = tw + ui(18);
-    let bh = ui(28);
-    let btn = rect(CR - bw, ROW2_CY - bh / 2, CR, ROW2_CY + bh / 2);
-    s.reset_rect = btn;
-
-    if !default && s.hover_reset {
-        crate::gdiplus::fill_round(hdc, &btn, ui(7) as f32, HOVER_BG);
-    }
-    let color = if default {
-        TXT_OFF
-    } else if s.hover_reset {
-        ACCENT
-    } else {
-        TXT_2
-    };
-    text_at(hdc, s.f_action, color, CR - bw / 2, ROW2_CY, label);
-
-    // ---- 第二张卡片：录制 ----
-    crate::gdiplus::fill_round(hdc, &CARD2, ui(10) as f32, CARD_BG);
-    crate::gdiplus::stroke_round(hdc, &CARD2, ui(10) as f32, CARD_BORDER, HAIRLINE);
-
-    let (_, rh) = measure(hdc, s.f_h1, "录制帧率");
-    let (_, rb) = measure(hdc, s.f_body, "60 更流畅");
-    let chip_gap = ui(8);
-    let chip_h = ui(15);
-
-    let top = FPS_CY - (rh + rb) / 2;
-    text(hdc, s.f_h1, TXT_1, CX, top, "录制帧率");
-    text(hdc, s.f_body, TXT_2, CX, top + rh, "60 更流畅，30 更省资源");
-
-    let w60 = measure(hdc, s.f_body, "60 fps").0 + ui(26);
-    let w30 = measure(hdc, s.f_body, "30 fps").0 + ui(26);
-    s.fps60 = rect(CR - w60, FPS_CY - chip_h, CR, FPS_CY + chip_h);
-    s.fps30 = rect(CR - w60 - chip_gap - w30, FPS_CY - chip_h, CR - w60 - chip_gap, FPS_CY + chip_h);
-    draw_chip(hdc, &s.fps30, "30 fps", s.cfg.record_fps == 30, s.f_body);
-    draw_chip(hdc, &s.fps60, "60 fps", s.cfg.record_fps == 60, s.f_body);
-
-    solid(hdc, &rect(CX, DIV2_Y, CR, DIV2_Y + 1), DIVIDER);
-
-    let top2 = CD_CY - (rh + rb) / 2;
-    text(hdc, s.f_h1, TXT_1, CX, top2, "开始前倒计时");
-    text(hdc, s.f_body, TXT_2, CX, top2 + rh, "留出切窗口的时间");
-
-    let w3 = measure(hdc, s.f_body, "3 秒").0 + ui(26);
-    let w0 = measure(hdc, s.f_body, "立即").0 + ui(26);
-    s.cd3 = rect(CR - w3, CD_CY - chip_h, CR, CD_CY + chip_h);
-    s.cd0 = rect(CR - w3 - chip_gap - w0, CD_CY - chip_h, CR - w3 - chip_gap, CD_CY + chip_h);
-    draw_chip(hdc, &s.cd0, "立即", s.cfg.record_countdown == 0, s.f_body);
-    draw_chip(hdc, &s.cd3, "3 秒", s.cfg.record_countdown == 3, s.f_body);
-
-    // ---- 第三张卡片：保存 ----
-    crate::gdiplus::fill_round(hdc, &CARD3, ui(10) as f32, CARD_BG);
-    crate::gdiplus::stroke_round(hdc, &CARD3, ui(10) as f32, CARD_BORDER, HAIRLINE);
-
-    let (_, sh2) = measure(hdc, s.f_h1, "保存位置");
-    let (_, sb2) = measure(hdc, s.f_body, "x");
-    let stop = SAVE_CY - (sh2 + sb2) / 2;
-    text(hdc, s.f_h1, TXT_1, CX, stop, "保存位置");
-    let dir = s.cfg.video_dir().display().to_string();
-    text(hdc, s.f_body, TXT_3, CX, stop + sh2, &ellipsize(&dir, 34));
-
-    let bw2 = ui(50);
-    let bh2 = ui(28);
-    s.dir_open = rect(CR - bw2, SAVE_CY - bh2 / 2, CR, SAVE_CY + bh2 / 2);
-    s.dir_edit = rect(CR - bw2 * 2 - ui(8), SAVE_CY - bh2 / 2, CR - bw2 - ui(8), SAVE_CY + bh2 / 2);
-    draw_button(hdc, &s.dir_edit, "更改", s.f_action);
-    draw_button(hdc, &s.dir_open, "打开", s.f_action);
-
-    solid(hdc, &rect(CX, DIV3_Y, CR, DIV3_Y + 1), DIVIDER);
-
-    let top3 = ASK_CY - (sh2 + sb2) / 2;
-    text(hdc, s.f_h1, TXT_1, CX, top3, "录完询问另存为");
-    text(hdc, s.f_body, TXT_2, CX, top3 + sh2, "否则直接存到上面的目录");
-
-    let wy = measure(hdc, s.f_body, "是").0 + ui(26);
-    let wn = measure(hdc, s.f_body, "否").0 + ui(26);
-    s.ask_no = rect(CR - wn, ASK_CY - chip_h, CR, ASK_CY + chip_h);
-    s.ask_yes = rect(CR - wn - chip_gap - wy, ASK_CY - chip_h, CR - wn - chip_gap, ASK_CY + chip_h);
-    draw_chip(hdc, &s.ask_yes, "是", s.cfg.video_ask_save, s.f_body);
-    draw_chip(hdc, &s.ask_no, "否", !s.cfg.video_ask_save, s.f_body);
-
-    // 页脚说明
+    let top = FPS_CY - (row_title_h + row_body_h) / 2;
+    text(hdc, s.f_h1, TXT_1, PAD, top, "录制帧率");
     text(
         hdc,
         s.f_body,
-        TXT_3,
+        TXT_2,
         PAD,
-        ui(500),
-        "组合键被其他程序占用时会自动还原。",
+        top + row_title_h,
+        "60 更流畅，30 更省资源",
     );
 
-    EndPaint(s.hwnd, &ps);
+    let (fps30, fps60) = segment_rects(hdc, CR, FPS_CY, "30 fps", "60 fps", s.f_body);
+    s.fps30 = fps30;
+    s.fps60 = fps60;
+    draw_segment_track(hdc, &fps30, &fps60);
+    draw_chip(hdc, &fps30, "30 fps", s.cfg.record_fps == 30, s.f_body);
+    draw_chip(hdc, &fps60, "60 fps", s.cfg.record_fps == 60, s.f_body);
+
+    solid(hdc, &rect(PAD, DIV_RECORD_Y, CR, DIV_RECORD_Y + 1), DIVIDER);
+
+    let top = CD_CY - (row_title_h + row_body_h) / 2;
+    text(hdc, s.f_h1, TXT_1, PAD, top, "开始前倒计时");
+    text(
+        hdc,
+        s.f_body,
+        TXT_2,
+        PAD,
+        top + row_title_h,
+        "留出切窗口的时间",
+    );
+
+    let (cd0, cd3) = segment_rects(hdc, CR, CD_CY, "立即", "3 秒", s.f_body);
+    s.cd0 = cd0;
+    s.cd3 = cd3;
+    draw_segment_track(hdc, &cd0, &cd3);
+    draw_chip(hdc, &cd0, "立即", s.cfg.record_countdown == 0, s.f_body);
+    draw_chip(hdc, &cd3, "3 秒", s.cfg.record_countdown == 3, s.f_body);
+
+    // ---- 保存设置 ----
+    text(hdc, s.f_action, ACCENT, PAD, SAVE_HEAD_Y, "保存");
+
+    let top = SAVE_CY - (row_title_h + row_body_h) / 2;
+    text(hdc, s.f_h1, TXT_1, PAD, top, "保存位置");
+    let dir = s.cfg.video_dir().display().to_string();
+    text(
+        hdc,
+        s.f_body,
+        TXT_2,
+        PAD,
+        top + row_title_h,
+        &ellipsize(&dir, 34),
+    );
+
+    let button_w = ui(50);
+    let button_h = ui(28);
+    s.dir_open = rect(
+        CR - button_w,
+        SAVE_CY - button_h / 2,
+        CR,
+        SAVE_CY + button_h / 2,
+    );
+    s.dir_edit = rect(
+        CR - button_w * 2 - ui(8),
+        SAVE_CY - button_h / 2,
+        CR - button_w - ui(8),
+        SAVE_CY + button_h / 2,
+    );
+    draw_button(hdc, &s.dir_edit, "更改", s.f_action);
+    draw_button(hdc, &s.dir_open, "打开", s.f_action);
+
+    solid(hdc, &rect(PAD, DIV_SAVE_Y, CR, DIV_SAVE_Y + 1), DIVIDER);
+
+    let top = ASK_CY - (row_title_h + row_body_h) / 2;
+    text(hdc, s.f_h1, TXT_1, PAD, top, "录完询问另存为");
+    text(
+        hdc,
+        s.f_body,
+        TXT_2,
+        PAD,
+        top + row_title_h,
+        "否则直接存到上面的目录",
+    );
+
+    let (ask_yes, ask_no) = segment_rects(hdc, CR, ASK_CY, "是", "否", s.f_body);
+    s.ask_yes = ask_yes;
+    s.ask_no = ask_no;
+    draw_segment_track(hdc, &ask_yes, &ask_no);
+    draw_chip(hdc, &ask_yes, "是", s.cfg.video_ask_save, s.f_body);
+    draw_chip(hdc, &ask_no, "否", !s.cfg.video_ask_save, s.f_body);
+
+    // ---- 页脚说明 ----
+    let footer = "组合键被其他程序占用时会自动还原。";
+    let (_, footer_h) = measure(hdc, s.f_body, footer);
+    let icon_size = ui(13);
+    let icon_top = FOOTER_Y + (footer_h - icon_size) / 2;
+    let icon = rect(PAD, icon_top, PAD + icon_size, icon_top + icon_size);
+    crate::gdiplus::ellipse(hdc, &icon, TXT_2, HAIRLINE);
+    text_at(
+        hdc,
+        s.f_brand,
+        TXT_2,
+        (icon.left + icon.right) / 2,
+        (icon.top + icon.bottom) / 2,
+        "i",
+    );
+    text(hdc, s.f_body, TXT_2, PAD + ui(18), FOOTER_Y, footer);
 }
 
 pub fn register() {
