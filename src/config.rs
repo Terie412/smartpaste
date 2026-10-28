@@ -35,6 +35,8 @@ pub struct Config {
     pub video_ask_save: bool,
     /// 录完是否用资源管理器打开刚才保存视频的目录
     pub video_open_dir: bool,
+    /// 取色面板里"最近使用"的颜色（COLORREF），新的在前
+    pub recent_colors: Vec<u32>,
 }
 
 impl Default for Config {
@@ -49,6 +51,7 @@ impl Default for Config {
             video_dir: None,
             video_ask_save: false,
             video_open_dir: true,
+            recent_colors: Vec::new(),
         }
     }
 }
@@ -141,8 +144,18 @@ impl Config {
                     let v = v.trim();
                     cfg.video_open_dir = v == "1" || v.eq_ignore_ascii_case("true");
                 }
-                k if k.starts_with("style.") => {
-                    if let Ok(i) = k["style.".len()..].parse::<usize>() {
+                "recent" => {
+                    cfg.recent_colors.clear();
+                    for part in v.split(',') {
+                        if cfg.recent_colors.len() >= 8 {
+                            break;
+                        }
+                        if let Some(c) = parse_rgb_hex(part) {
+                            cfg.recent_colors.push(c);
+                        }
+                    }
+                }
+                k if k.starts_with("style.") => {                    if let Ok(i) = k["style.".len()..].parse::<usize>() {
                         if i < 5 {
                             cfg.styles[i] = Some(v.trim().to_string());
                         }
@@ -190,12 +203,38 @@ impl Config {
                 text.push_str(&format!("style.{i}={v}\n"));
             }
         }
+        if !self.recent_colors.is_empty() {
+            let list: Vec<String> = self
+                .recent_colors
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{:02X}{:02X}{:02X}",
+                        c & 0xFF,
+                        (c >> 8) & 0xFF,
+                        (c >> 16) & 0xFF
+                    )
+                })
+                .collect();
+            text.push_str(&format!("recent={}\n", list.join(",")));
+        }
         std::fs::write(&p, text).is_ok()
     }
 
     pub fn hotkey_text(&self) -> String {
         hotkey_text(self.hotkey_mod, self.hotkey_vk)
     }
+}
+
+/// 把 "RRGGBB" 或 "#RRGGBB" 解析成 COLORREF
+fn parse_rgb_hex(s: &str) -> Option<u32> {
+    let t = s.trim().trim_start_matches('#');
+    if t.len() != 6 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(t, 16).ok()?;
+    // COLORREF 是 0x00BBGGRR，和 RRGGBB 的红蓝是反过来的
+    Some(((v >> 16) & 0xFF) | (v & 0x00FF_00) | ((v & 0xFF) << 16))
 }
 
 /// 把修饰位 + 主键拆成 ["Ctrl", "Shift", "A"]。

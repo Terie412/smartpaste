@@ -387,6 +387,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                         video_dir: cfg.video_dir.clone(),
                         video_ask_save: cfg.video_ask_save,
                         video_open_dir: cfg.video_open_dir,
+                        recent_colors: cfg.recent_colors.clone(),
                     }
                     .save();
                     win::trace(&format!(
@@ -402,6 +403,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                             video_dir: cfg.video_dir.clone(),
                             video_ask_save: cfg.video_ask_save,
                             video_open_dir: cfg.video_open_dir,
+                            recent_colors: cfg.recent_colors.clone(),
                         }
                         .hotkey_text(),
                         back

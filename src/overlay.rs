@@ -18,7 +18,7 @@ use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FR
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC,
     CreateDIBSection, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect,
-    GetDC, GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, IntersectClipRect,
+    GdiFlush, GetDC, GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, IntersectClipRect,
     InvalidateRect, Rectangle, ReleaseDC, RestoreDC, SaveDC, ScreenToClient, SelectObject,
     SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, TextOutW, UpdateWindow, AC_SRC_OVER,
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, COLORONCOLOR, DIB_RGB_COLORS, HDC, HFONT,
@@ -32,10 +32,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     ChildWindowFromPointEx, CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW, PostMessageW, RegisterClassW,
-    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW,
+    ShowWindow,
     CWP_SKIPINVISIBLE,
     CWP_SKIPTRANSPARENT, EC_LEFTMARGIN, EC_RIGHTMARGIN, EN_CHANGE, ES_MULTILINE, ES_NOHIDESEL,
-    ES_WANTRETURN, HCURSOR, ICONINFO, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+    ES_WANTRETURN, HCURSOR, ICONINFO, IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
     IDC_SIZENWSE, IDC_SIZEWE, SM_CXCURSOR, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW,
     WM_APP, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_CHILD,
@@ -77,6 +78,9 @@ const WM_SETFONT: u32 = 0x0030;
 const WM_TEXT_COMMIT: u32 = WM_APP + 5;
 /// 取消文本输入
 const WM_TEXT_CANCEL: u32 = WM_APP + 6;
+/// 取色面板的 Hex 输入：回车落定 / Esc 还原
+const WM_HEX_COMMIT: u32 = WM_APP + 7;
+const WM_HEX_CANCEL: u32 = WM_APP + 8;
 
 const CLASS_NAME: &str = "SmartPasteOverlay";
 const MASK_ALPHA: u8 = 128;
@@ -122,6 +126,55 @@ const COLORS: [u32; 6] = [
     0x0000_0000, // 黑
 ];
 
+// ---- 取色面板 ----
+
+/// 面板内边距
+const PK_PAD: i32 = ui(10);
+/// 面板内元素之间的竖直间距
+const PK_GAP: i32 = ui(9);
+/// 饱和度/明度方块
+const PK_SV_W: i32 = ui(150);
+const PK_SV_H: i32 = ui(80);
+/// 色相条
+const PK_HUE_H: i32 = ui(12);
+/// Hex 输入框
+const PK_FIELD_H: i32 = ui(24);
+/// 色格的间距（边长按列宽现算，保证正好铺满）
+const PK_CHIP_GAP: i32 = ui(4);
+/// 小标题（"最近""预设"）的高度
+const PK_LABEL_H: i32 = ui(14);
+/// 预设色列数
+const PK_COLS: i32 = 6;
+/// 最近使用色的上限，同时也是面板里那一行的格子数
+const RECENT_MAX: usize = 8;
+
+/// `#RRGGBB` → COLORREF。const 上下文里要能算，所以不用函数式构造。
+const fn cref(r: u8, g: u8, b: u8) -> u32 {
+    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
+}
+
+/// 面板里的预设色：第一行就是属性条上那 6 个，下面两行是深一档和浅一档。
+const PRESETS: [u32; 18] = [
+    cref(0xFF, 0x2E, 0x63),
+    cref(0xFF, 0xC8, 0x00),
+    cref(0x00, 0x8F, 0xFF),
+    cref(0x50, 0xC8, 0x78),
+    cref(0xFF, 0xFF, 0xFF),
+    cref(0x00, 0x00, 0x00),
+    cref(0xD8, 0x1E, 0x48),
+    cref(0xD9, 0xA4, 0x00),
+    cref(0x00, 0x70, 0xCC),
+    cref(0x2E, 0x8B, 0x57),
+    cref(0x8A, 0x8A, 0x92),
+    cref(0xF1, 0xF1, 0xF5),
+    cref(0xFF, 0x7A, 0x9C),
+    cref(0xFF, 0xDB, 0x4D),
+    cref(0x6F, 0xC3, 0xFF),
+    cref(0x9F, 0xE0, 0xB4),
+    cref(0xC9, 0xC9, 0xD1),
+    cref(0x3A, 0x3A, 0x44),
+];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
     Shape,
@@ -154,7 +207,7 @@ impl Tool {
             Prop::Color(5),
         ];
 
-        static SHAPE: [Prop; 13] = [
+        static SHAPE: [Prop; 14] = [
             // 形状 | 颜色 | 填充 | 粗细
             Prop::Round(false),
             Prop::Round(true),
@@ -165,12 +218,13 @@ impl Tool {
             Prop::Color(3),
             Prop::Color(4),
             Prop::Color(5),
+            Prop::Custom,
             Prop::Sep,
             Prop::Filled,
             Prop::Sep,
             Prop::Width,
         ];
-        static ARROW: [Prop; 10] = [
+        static ARROW: [Prop; 11] = [
             // 颜色 | 线型 | 粗细
             Prop::Color(0),
             Prop::Color(1),
@@ -178,12 +232,13 @@ impl Tool {
             Prop::Color(3),
             Prop::Color(4),
             Prop::Color(5),
+            Prop::Custom,
             Prop::Sep,
             Prop::Dashed,
             Prop::Sep,
             Prop::Width,
         ];
-        static PEN: [Prop; 8] = [
+        static PEN: [Prop; 9] = [
             // 颜色 | 粗细
             Prop::Color(0),
             Prop::Color(1),
@@ -191,10 +246,11 @@ impl Tool {
             Prop::Color(3),
             Prop::Color(4),
             Prop::Color(5),
+            Prop::Custom,
             Prop::Sep,
             Prop::Width,
         ];
-        static TEXT: [Prop; 12] = [
+        static TEXT: [Prop; 13] = [
             // 颜色 | 字号 | 字效
             Prop::Color(0),
             Prop::Color(1),
@@ -202,6 +258,7 @@ impl Tool {
             Prop::Color(3),
             Prop::Color(4),
             Prop::Color(5),
+            Prop::Custom,
             Prop::Sep,
             Prop::Width,
             Prop::Sep,
@@ -245,6 +302,8 @@ const LENS_N: i32 = 15;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Prop {
     Color(usize),
+    /// 打开取色面板（连续取色 + 预设色表 + Hex）
+    Custom,
     Width,
     Filled,
     Dashed,
@@ -284,6 +343,30 @@ enum Grab {
     Move,
     /// 拖边/角：位掩码 1 左 2 右 4 上 8 下
     Edge(u8),
+}
+
+/// 取色面板。几何一次算好存下来，绘制和命中都读它，不重复算。
+///
+/// HSV 三个分量单独存，不靠 RGB 反推：在 v=0 / s=0 这种边界上 RGB 会丢信息，
+/// 拖回原位色相就跳了。
+struct Picker {
+    rect: RECT,
+    sv: RECT,
+    hue: RECT,
+    field: RECT,
+    dropper: RECT,
+    /// 预设色格
+    presets: Vec<(RECT, u32)>,
+    /// 最近使用那一行。颜色每次从 Overlay::recent 现取，位置固定
+    recent_rects: Vec<RECT>,
+    /// 0 空闲，1 拖 SV，2 拖色相
+    drag: u8,
+    h: f32,
+    s: f32,
+    v: f32,
+    /// 悬停的格子序号：0..RECENT_MAX 是最近使用，之后是预设；-1 无
+    hover: i32,
+    hover_drop: bool,
 }
 
 pub struct Overlay {
@@ -340,6 +423,24 @@ pub struct Overlay {
     /// 录制倒计时剩余秒数，0 表示没在倒计时
     pub countdown: i32,
     count_font: HFONT,
+    /// 取色面板，None = 没开
+    picker: Option<Picker>,
+    /// 面板里的 Hex 输入框（独立的 EDIT，和文字标注那个不是一套）
+    hex_edit: HWND,
+    hex_font: HFONT,
+    /// 正在程序化改写 Hex 文本，期间忽略 EN_CHANGE，否则自己触发自己
+    hex_sync: bool,
+    /// HSV 渐变缓存的画布（SV 方块 + 色相条上下拼在一起）
+    grad_dc: HDC,
+    #[allow(dead_code)]
+    grad_bmp: windows_sys::Win32::Graphics::Gdi::HBITMAP,
+    grad_bits: *mut u32,
+    /// 缓存对应哪个色相，-1 = 脏
+    grad_hue: f32,
+    /// 最近用过的颜色（COLORREF），新的在前
+    recent: Vec<u32>,
+    /// 吸管模式：下一次点击把光标下的像素作为当前颜色
+    eyedrop: bool,
 }
 
 static mut OVERLAY: Option<Box<Overlay>> = None;
@@ -393,6 +494,89 @@ fn color_text(r: u8, g: u8, b: u8, hex: bool) -> String {
     } else {
         format!("{r}, {g}, {b}")
     }
+}
+
+/// HSV → COLORREF。h 取 0..360，s/v 取 0..1。
+fn hsv_rgb(h: f32, s: f32, v: f32) -> u32 {
+    let h = h.rem_euclid(360.0);
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    let c = v * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - ((hp % 2.0) - 1.0).abs());
+    let (r, g, b) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    let to = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    cref(to(r), to(g), to(b))
+}
+
+/// COLORREF → HSV
+fn rgb_hsv(color: u32) -> (f32, f32, f32) {
+    let r = (color & 0xFF) as f32 / 255.0;
+    let g = ((color >> 8) & 0xFF) as f32 / 255.0;
+    let b = ((color >> 16) & 0xFF) as f32 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d <= f32::EPSILON {
+        0.0
+    } else if max == r {
+        60.0 * ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    (h.rem_euclid(360.0), if max <= 0.0 { 0.0 } else { d / max }, max)
+}
+
+/// COLORREF（0x00BBGGRR）→ 32bpp DIB 里一个像素该有的值（0x00RRGGBB）。
+/// 凡是手工往 DIB 里填像素的地方都得过这一下，写反了红蓝就换过来。
+fn dib_px(c: u32) -> u32 {
+    ((c & 0xFF) << 16) | (c & 0x00FF_00) | ((c >> 16) & 0xFF)
+}
+
+fn hex_text(color: u32) -> String {    format!(
+        "#{:02X}{:02X}{:02X}",
+        color & 0xFF,
+        (color >> 8) & 0xFF,
+        (color >> 16) & 0xFF
+    )
+}
+
+/// 宽容地解析 `#RRGGBB`：允许没有 `#`、允许大小写、忽略夹在里面的空格。
+/// 位数不对就返回 None，让输入框可以处在"打到一半"的状态。
+fn parse_hex(s: &str) -> Option<u32> {
+    let mut v = 0u32;
+    let mut n = 0;
+    for c in s.chars() {
+        if let Some(d) = c.to_digit(16) {
+            v = v * 16 + d;
+            n += 1;
+            if n > 6 {
+                return None;
+            }
+        } else if c.is_whitespace() || c == '#' {
+            continue;
+        } else {
+            return None;
+        }
+    }
+    if n != 6 {
+        return None;
+    }
+    Some(cref(
+        ((v >> 16) & 0xFF) as u8,
+        ((v >> 8) & 0xFF) as u8,
+        (v & 0xFF) as u8,
+    ))
 }
 
 /// EDIT 的子类过程：只截 Enter / Esc，其余原样转发。
@@ -449,6 +633,57 @@ unsafe extern "system" fn text_edit_proc(
         return 1;
     }
 
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+/// 面板里 Hex 输入框的子类过程。
+///
+/// 和文字标注那个 EDIT 是两套：这里只需要"回车落定 / Esc 还原"，
+/// 而且底层是面板卡片，擦背景同样从 back buffer 拷。
+unsafe extern "system" fn hex_edit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if msg == WM_KEYDOWN {
+        let vk = wparam as u32;
+        if vk == VK_RETURN as u32 {
+            if let Some(ov) = OVERLAY.as_ref() {
+                PostMessageW(ov.hwnd, WM_HEX_COMMIT, 0, 0);
+            }
+            return 0;
+        }
+        if vk == VK_ESCAPE as u32 {
+            if let Some(ov) = OVERLAY.as_ref() {
+                PostMessageW(ov.hwnd, WM_HEX_CANCEL, 0, 0);
+            }
+            return 0;
+        }
+    }
+    if msg == 0x0014 {
+        if let Some(ov) = OVERLAY.as_ref() {
+            let hdc = wparam as HDC;
+            let mut cr: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut cr);
+            let mut wr: RECT = std::mem::zeroed();
+            GetWindowRect(hwnd, &mut wr);
+            BitBlt(
+                hdc,
+                0,
+                0,
+                cr.right,
+                cr.bottom,
+                ov.back_dc,
+                wr.left - ov.screen.x,
+                wr.top - ov.screen.y,
+                SRCCOPY,
+            );
+        }
+        return 1;
+    }
     DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
@@ -681,6 +916,8 @@ impl Overlay {
 
     unsafe fn begin_grab(&mut self, x: i32, y: i32, zone: u8) {
         let Some(s) = self.selection() else { return };
+        // 选区一动，面板的锚点就作废了，先收起来
+        self.close_picker();
         self.grab = if zone == 0 {
             Grab::Move
         } else {
@@ -875,7 +1112,496 @@ impl Overlay {
         }
     }
 
-    /// 在点击处拉起一个 EDIT 子窗口输入文字。
+    // ------------------------------------------------------------ 取色面板
+
+    /// 打开取色面板。已经开着就当作"再点一次关闭"。
+    ///
+    /// 几何在这里一次算死：颜色格按列数均分内容宽度，所以右边缘天然对齐；
+    /// 位置优先贴在属性条上方，放不下翻到下方，最后夹进屏幕。
+    unsafe fn open_picker(&mut self) {
+        if self.tool.is_none() {
+            return;
+        }
+        if self.picker.is_some() {
+            self.close_picker();
+            return;
+        }
+        self.commit_text();
+
+        let Some(anchor) = self
+            .props
+            .iter()
+            .find(|(_, p)| *p == Prop::Custom)
+            .map(|(r, _)| *r)
+        else {
+            return;
+        };
+
+        let cw = PK_SV_W;
+        let chip = (cw - (PK_COLS - 1) * PK_CHIP_GAP) / PK_COLS;
+        let rows = PRESETS.len() as i32 / PK_COLS;
+        let small = (cw - (RECENT_MAX as i32 - 1) * PK_CHIP_GAP) / RECENT_MAX as i32;
+
+        let content_h = PK_SV_H
+            + PK_GAP
+            + PK_HUE_H
+            + PK_GAP
+            + PK_FIELD_H
+            + PK_GAP
+            + PK_LABEL_H
+            + small
+            + PK_GAP
+            + PK_LABEL_H
+            + rows * chip
+            + (rows - 1) * PK_CHIP_GAP;
+        let w = cw + PK_PAD * 2;
+        let h = content_h + PK_PAD * 2;
+
+        let mut left = anchor.right - w;
+        left = left.clamp(4, (self.screen.width - w - 4).max(4));
+        let mut top = anchor.top - PK_GAP - h;
+        if top < 4 {
+            top = anchor.bottom + PK_GAP;
+            if top + h > self.screen.height - 4 {
+                top = (self.screen.height - h - 4).max(4);
+            }
+        }
+
+        let card = rect(left, top, left + w, top + h);
+        let x0 = left + PK_PAD;
+        let mut y = top + PK_PAD;
+        let sv = rect(x0, y, x0 + cw, y + PK_SV_H);
+        y += PK_SV_H + PK_GAP;
+        let hue = rect(x0, y, x0 + cw, y + PK_HUE_H);
+        y += PK_HUE_H + PK_GAP;
+        let field = rect(x0, y, x0 + cw - PK_FIELD_H - PK_GAP, y + PK_FIELD_H);
+        let dropper = rect(x0 + cw - PK_FIELD_H, y, x0 + cw, y + PK_FIELD_H);
+        y += PK_FIELD_H + PK_GAP + PK_LABEL_H;
+
+        let mut recent_rects = Vec::with_capacity(RECENT_MAX);
+        for i in 0..RECENT_MAX as i32 {
+            let cx = x0 + i * (small + PK_CHIP_GAP);
+            recent_rects.push(rect(cx, y, cx + small, y + small));
+        }
+        y += small + PK_GAP + PK_LABEL_H;
+
+        let mut presets = Vec::with_capacity(PRESETS.len());
+        for (i, c) in PRESETS.iter().enumerate() {
+            let (col, row) = (i as i32 % PK_COLS, i as i32 / PK_COLS);
+            let cx = x0 + col * (chip + PK_CHIP_GAP);
+            let cy = y + row * (chip + PK_CHIP_GAP);
+            presets.push((rect(cx, cy, cx + chip, cy + chip), *c));
+        }
+
+        let color = self.styles[self.tool.unwrap().idx()].color;
+        let (hh, ss, vv) = rgb_hsv(color);
+        self.picker = Some(Picker {
+            rect: card,
+            sv,
+            hue,
+            field,
+            dropper,
+            presets,
+            recent_rects,
+            drag: 0,
+            h: hh,
+            s: ss,
+            v: vv,
+            hover: -1,
+            hover_drop: false,
+        });
+        self.grad_hue = -1.0;
+        self.create_hex_edit(field);
+        crate::win::trace(&format!(
+            "picker: open {}x{} at ({left},{top})",
+            w, h
+        ));
+    }
+
+    unsafe fn close_picker(&mut self) {
+        if self.picker.is_none() && self.hex_edit.is_null() {
+            return;
+        }
+        self.destroy_hex_edit();
+        self.picker = None;
+        self.grad_hue = -1.0;
+        // 收尾统一落一次盘：Hex 输入和拖动途中都是攒着不写的
+        if let Some(tool) = self.tool {
+            let c = self.styles[tool.idx()].color;
+            self.push_recent(c);
+            save_styles(self);
+        }
+        crate::win::trace("picker: close");
+        if !self.hwnd.is_null() {
+            SetFocus(self.hwnd);
+            InvalidateRect(self.hwnd, std::ptr::null(), 0);
+        }
+    }
+
+    /// Hex 输入框：和文字标注那套 EDIT 分开，换行/字号/字体都不一样
+    unsafe fn create_hex_edit(&mut self, field: RECT) {
+        self.destroy_hex_edit();
+        let font = ui_font_w(ui(12), 600);
+        let edit = CreateWindowExW(
+            0,
+            to_wide("EDIT").as_ptr(),
+            std::ptr::null(),
+            WS_CHILD | WS_VISIBLE,
+            field.left + ui(6),
+            field.top + ui(6),
+            field.right - field.left - ui(12),
+            field.bottom - field.top - ui(12),
+            self.hwnd,
+            2 as *mut core::ffi::c_void,
+            hinstance(),
+            std::ptr::null_mut(),
+        );
+        if edit.is_null() {
+            crate::win::trace("picker: hex EDIT failed");
+            delete_font(font);
+            return;
+        }
+        self.hex_edit = edit;
+        self.hex_font = font;
+        SendMessageW(edit, WM_SETFONT, font as WPARAM, 1);
+        SendMessageW(
+            edit,
+            EM_SETMARGINS,
+            (EC_LEFTMARGIN | EC_RIGHTMARGIN) as WPARAM,
+            0,
+        );
+        SetWindowSubclass(edit, Some(hex_edit_proc), 2, 0);
+        self.sync_hex_text();
+    }
+
+    unsafe fn destroy_hex_edit(&mut self) {
+        if !self.hex_edit.is_null() {
+            RemoveWindowSubclass(self.hex_edit, Some(hex_edit_proc), 2);
+            DestroyWindow(self.hex_edit);
+            self.hex_edit = std::ptr::null_mut();
+        }
+        if !self.hex_font.is_null() {
+            delete_font(self.hex_font);
+            self.hex_font = std::ptr::null_mut();
+        }
+    }
+
+    /// 把当前颜色写进 Hex 框。`hex_sync` 挡住由此触发的 EN_CHANGE，否则自己咬自己。
+    unsafe fn sync_hex_text(&mut self) {
+        if self.hex_edit.is_null() {
+            return;
+        }
+        let Some(tool) = self.tool else { return };
+        let s = to_wide(&hex_text(self.styles[tool.idx()].color));
+        self.hex_sync = true;
+        SetWindowTextW(self.hex_edit, s.as_ptr());
+        self.hex_sync = false;
+    }
+
+    /// Hex 框回车：解析成功就落定，失败就还原成当前颜色
+    unsafe fn commit_hex(&mut self) {
+        let raw = self.hex_raw();
+        match parse_hex(&raw) {
+            Some(c) => self.set_color(c, true),
+            None => self.sync_hex_text(),
+        }
+        SetFocus(self.hwnd);
+    }
+
+    /// 边打边生效。不整串重写输入框——那会把光标推回开头。
+    unsafe fn hex_live(&mut self) {
+        let raw = self.hex_raw();
+        let Some(c) = parse_hex(&raw) else { return };
+        let (h, s, v) = rgb_hsv(c);
+        if let Some(pk) = self.picker.as_mut() {
+            // 纯灰没有色相，保留原来的，否则指针会跳回红
+            if s > 0.0 {
+                pk.h = h;
+            }
+            pk.s = s;
+            pk.v = v;
+        }
+        if let Some(tool) = self.tool {
+            self.styles[tool.idx()].color = c;
+        }
+        InvalidateRect(self.hwnd, std::ptr::null(), 0);
+    }
+
+    unsafe fn hex_raw(&self) -> String {
+        if self.hex_edit.is_null() {
+            return String::new();
+        }
+        let len = GetWindowTextLengthW(self.hex_edit);
+        let mut buf = vec![0u16; len as usize + 1];
+        GetWindowTextW(self.hex_edit, buf.as_mut_ptr(), len + 1);
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+
+    /// 改当前工具的颜色。`remember = false` 用于拖动过程中的连续更新——
+    /// 那时不写配置也不记最近使用，抬手时才落一次。
+    unsafe fn set_color(&mut self, color: u32, remember: bool) {
+        let Some(tool) = self.tool else { return };
+        self.styles[tool.idx()].color = color;
+        if remember {
+            self.push_recent(color);
+            save_styles(self);
+        }
+        self.sync_hex_text();
+    }
+
+    fn push_recent(&mut self, color: u32) {
+        self.recent.retain(|c| *c != color);
+        self.recent.insert(0, color);
+        self.recent.truncate(RECENT_MAX);
+    }
+
+    /// 点到了哪个颜色格。返回 (颜色, 格子序号)；空格子返回 None。
+    fn picker_color_at(&self, x: i32, y: i32) -> Option<(u32, i32)> {
+        let pk = self.picker.as_ref()?;
+        for (i, r) in pk.recent_rects.iter().enumerate() {
+            if pt_in(r, x, y) {
+                return self.recent.get(i).map(|c| (*c, i as i32));
+            }
+        }
+        for (i, (r, c)) in pk.presets.iter().enumerate() {
+            if pt_in(r, x, y) {
+                return Some((*c, (RECENT_MAX + i) as i32));
+            }
+        }
+        None
+    }
+
+    unsafe fn picker_click(&mut self, x: i32, y: i32) {
+        let Some(pk) = self.picker.as_ref() else { return };
+        let (inside, sv, hue, field, dropper) =
+            (pt_in(&pk.rect, x, y), pk.sv, pk.hue, pk.field, pk.dropper);
+
+        if !inside {
+            crate::win::trace(&format!("picker: click outside ({x},{y}) -> close"));
+            self.close_picker();
+            return;
+        }
+        // 点了面板上别的地方就把焦点从 Hex 框收回来，
+        // 否则后面的 Esc 会被 Hex 框吃掉（只还原文字，不关面板）
+        if !pt_in(&field, x, y) {
+            SetFocus(self.hwnd);
+        }
+        if let Some((c, _)) = self.picker_color_at(x, y) {
+            self.set_color(c, true);
+            InvalidateRect(self.hwnd, std::ptr::null(), 0);
+            return;
+        }
+        if pt_in(&sv, x, y) {
+            if let Some(p) = self.picker.as_mut() {
+                p.drag = 1;
+            }
+            SetFocus(self.hwnd);
+            SetCapture(self.hwnd);
+            self.picker_drag(x, y);
+            return;
+        }
+        if pt_in(&hue, x, y) {
+            if let Some(p) = self.picker.as_mut() {
+                p.drag = 2;
+            }
+            SetFocus(self.hwnd);
+            SetCapture(self.hwnd);
+            self.picker_drag(x, y);
+            return;
+        }
+        if pt_in(&field, x, y) {
+            if !self.hex_edit.is_null() {
+                SetFocus(self.hex_edit);
+            }
+            return;
+        }
+        if pt_in(&dropper, x, y) {
+            self.close_picker();
+            self.eyedrop = true;
+            InvalidateRect(self.hwnd, std::ptr::null(), 0);
+        }
+    }
+
+    /// 拖动 SV 方块 / 色相条
+    unsafe fn picker_drag(&mut self, x: i32, y: i32) {
+        let Some(pk) = self.picker.as_mut() else { return };
+        let (fx, fy) = (
+            (pk.sv.right - pk.sv.left - 1).max(1) as f32,
+            (pk.sv.bottom - pk.sv.top - 1).max(1) as f32,
+        );
+        match pk.drag {
+            1 => {
+                pk.s = ((x - pk.sv.left) as f32 / fx).clamp(0.0, 1.0);
+                pk.v = 1.0 - ((y - pk.sv.top) as f32 / fy).clamp(0.0, 1.0);
+            }
+            2 => {
+                let fw = (pk.hue.right - pk.hue.left - 1).max(1) as f32;
+                pk.h = 360.0 * ((x - pk.hue.left) as f32 / fw).clamp(0.0, 1.0);
+            }
+            _ => return,
+        }
+        let color = hsv_rgb(pk.h, pk.s, pk.v);
+        self.set_color(color, false);
+        InvalidateRect(self.hwnd, std::ptr::null(), 0);
+    }
+
+    /// 面板内的悬停。有变化返回 true（调用方据此决定要不要重画）。
+    unsafe fn picker_hover(&mut self, x: i32, y: i32) -> bool {
+        let idx = self
+            .picker_color_at(x, y)
+            .map(|(_, i)| i)
+            .unwrap_or(-1);
+        let drop = match self.picker.as_ref() {
+            Some(pk) => pt_in(&pk.dropper, x, y),
+            None => false,
+        };
+        let changed = match self.picker.as_ref() {
+            Some(pk) => pk.hover != idx || pk.hover_drop != drop,
+            None => false,
+        };
+        if changed {
+            if let Some(pk) = self.picker.as_mut() {
+                pk.hover = idx;
+                pk.hover_drop = drop;
+            }
+        }
+        changed
+    }
+
+    /// HSV 渐变缓存：只有色相变了才重算。SV 方块和色相条拼在同一张 DIB 上，
+    /// 竖直方向 0..PK_SV_H 是方块，PK_SV_H.. 是色相条。
+    unsafe fn ensure_gradient(&mut self, h: f32) {
+        if (self.grad_hue - h).abs() < 0.001 || self.grad_bits.is_null() {
+            return;
+        }
+        let w = PK_SV_W;
+        for y in 0..PK_SV_H {
+            let v = 1.0 - y as f32 / (PK_SV_H - 1).max(1) as f32;
+            for x in 0..w {
+                let s = x as f32 / (w - 1).max(1) as f32;
+                // hsv_rgb 给的是 COLORREF（0x00BBGGRR），DIB 里要 0x00RRGGBB，
+                // 红蓝必须换回来——不换的话整块渐变会从粉红变成蓝紫
+                *self.grad_bits.add((y * w + x) as usize) = dib_px(hsv_rgb(h, s, v));
+            }
+        }
+        for y in 0..PK_HUE_H {
+            for x in 0..w {
+                let hue = 360.0 * x as f32 / (w - 1).max(1) as f32;
+                *self.grad_bits.add(((PK_SV_H + y) * w + x) as usize) =
+                    dib_px(hsv_rgb(hue, 1.0, 1.0));
+            }
+        }
+        GdiFlush();
+        self.grad_hue = h;
+    }
+
+    unsafe fn draw_picker(&mut self, dc: HDC) {
+        let Some(tool) = self.tool else { return };
+        let color = self.styles[tool.idx()].color;
+        let Some(h) = self.picker.as_ref().map(|p| p.h) else {
+            return;
+        };
+        self.ensure_gradient(h);
+
+        let Some(pk) = self.picker.as_ref() else { return };
+        let (cw, ch) = (PK_SV_W, PK_SV_H);
+
+        // 卡片。投影省了：面板下方常常是没有蒙层的截图，靠描边就够分清层次
+        round_fill(dc, &pk.rect, ui(10), 0x00FF_FFFF);
+        round_stroke(dc, &pk.rect, ui(10), rgb(0xD6, 0xD6, 0xDC));
+
+        BitBlt(dc, pk.sv.left, pk.sv.top, cw, ch, self.grad_dc, 0, 0, SRCCOPY);
+        crate::gdiplus::rect_stroke(dc, &pk.sv, 0x00D8D8DE, 1.0);
+        BitBlt(
+            dc,
+            pk.hue.left,
+            pk.hue.top,
+            cw,
+            PK_HUE_H,
+            self.grad_dc,
+            0,
+            ch,
+            SRCCOPY,
+        );
+        crate::gdiplus::rect_stroke(dc, &pk.hue, 0x00D8D8DE, 1.0);
+
+        // SV 上的取色环：外白内黑，任何底色上都看得见
+        let sx = pk.sv.left + (pk.s * (cw - 1) as f32) as i32;
+        let sy = pk.sv.top + ((1.0 - pk.v) * (ch - 1) as f32) as i32;
+        let outer = rect(sx - ui(5), sy - ui(5), sx + ui(5), sy + ui(5));
+        crate::gdiplus::ellipse(dc, &outer, 0x00FF_FFFF, 2.4);
+        let inner = rect(sx - ui(4), sy - ui(4), sx + ui(4), sy + ui(4));
+        crate::gdiplus::ellipse(dc, &inner, rgb(0x20, 0x20, 0x28), 1.0);
+
+        // 色相指针
+        let hx = pk.hue.left + (pk.h * (cw - 1) as f32 / 360.0) as i32;
+        let ptr_r = rect(hx - ui(2), pk.hue.top - ui(2), hx + ui(2), pk.hue.bottom + ui(2));
+        round_fill(dc, &ptr_r, 4, 0x00FF_FFFF);
+        crate::gdiplus::stroke_round(dc, &ptr_r, 2.0, rgb(0x1A, 0x1A, 0x20), 1.4);
+
+        // Hex 输入框底色。字由 EDIT 自己画，擦背景时从 back buffer 拷，
+        // 所以这里画的圆角能原样透出来。
+        round_fill(dc, &pk.field, ui(6), rgb(0xF1, 0xF1, 0xF5));
+        round_stroke(dc, &pk.field, ui(6), rgb(0xDD, 0xDD, 0xE3));
+
+        // 吸管按钮
+        let db = pk.dropper;
+        let bg = if pk.hover_drop { rgb(0xE7, 0xE7, 0xEE) } else { rgb(0xF1, 0xF1, 0xF5) };
+        round_fill(dc, &db, ui(6), bg);
+        round_stroke(dc, &db, ui(6), rgb(0xDD, 0xDD, 0xE3));
+        let (dcx, dcy) = ((db.left + db.right) / 2, (db.top + db.bottom) / 2);
+        crate::gdiplus::line(
+            dc,
+            dcx - ui(5),
+            dcy + ui(5),
+            dcx + ui(4),
+            dcy - ui(4),
+            rgb(0x20, 0x20, 0x28),
+            2.6,
+        );
+        let bulb = rect(dcx + ui(3), dcy - ui(7), dcx + ui(8), dcy - ui(2));
+        crate::gdiplus::fill_round(dc, &bulb, ui(2) as f32, rgb(0x20, 0x20, 0x28));
+
+        // 两个小标题
+        let label = crate::gdiplus::FontSpec::new(ui(10) as f32, false, "Microsoft YaHei");
+        crate::gdiplus::draw_text(
+            dc,
+            &label,
+            rgb(0x9A, 0x9A, 0xA4),
+            pk.sv.left,
+            pk.field.bottom + PK_GAP,
+            "最近",
+        );
+
+        // 最近使用：空位留淡底，位置固定，学得快
+        for (i, r) in pk.recent_rects.iter().enumerate() {
+            match self.recent.get(i) {
+                Some(c) => chip_cell(dc, r, *c, *c == color, pk.hover == i as i32),
+                None => round_fill(dc, r, ui(5), rgb(0xF4, 0xF4, 0xF7)),
+            }
+        }
+        if let Some((first, _)) = pk.presets.first() {
+            crate::gdiplus::draw_text(
+                dc,
+                &label,
+                rgb(0x9A, 0x9A, 0xA4),
+                pk.sv.left,
+                first.top - PK_LABEL_H,
+                "预设",
+            );
+        }
+        for (i, (r, c)) in pk.presets.iter().enumerate() {
+            chip_cell(
+                dc,
+                r,
+                *c,
+                *c == color,
+                pk.hover == (RECENT_MAX + i) as i32,
+            );
+        }
+    }
+
+
     ///
     /// 用系统 EDIT 而不是自己收 WM_CHAR：中文输入法需要 IME 组字、候选窗、
     /// 光标跟随，这套东西只有 EDIT 控件是现成的。
@@ -1182,8 +1908,14 @@ impl Overlay {
                 }
             }
 
+            // 5.5 取色面板：盖在属性条上，也盖住选区内容
+            if self.picker.is_some() {
+                let dc = self.back_dc;
+                self.draw_picker(dc);
+            }
+
             // 6. 预备状态：光标下的像素颜色
-            if !self.locked {
+            if !self.locked || self.eyedrop {
                 draw_color_hud(
                     self.back_dc,
                     &self.screen,
@@ -1226,6 +1958,13 @@ impl Drop for Overlay {
             }
             delete_font(self.label_font);
             delete_font(self.count_font);
+            if !self.grad_dc.is_null() {
+                DeleteDC(self.grad_dc);
+            }
+            if !self.grad_bmp.is_null() {
+                DeleteObject(self.grad_bmp as HGDIOBJ);
+            }
+            self.destroy_hex_edit();
         }
     }
 }
@@ -1444,6 +2183,20 @@ unsafe fn draw_bar(
     round_stroke(dc, &bar, RADIUS_BAR, rgb(0xD6, 0xD6, 0xDC));
 }
 
+/// 面板里的一个色格：圆角色块 + 描边。选中时描边加粗转深，
+/// 悬停时也加深一档——白底上的白色块没有描边就看不见了。
+unsafe fn chip_cell(dc: HDC, r: &RECT, color: u32, selected: bool, hover: bool) {
+    round_fill(dc, r, ui(5), color);
+    let (line, w) = if selected {
+        (rgb(0x1A, 0x1A, 0x20), 2.0)
+    } else if hover {
+        (rgb(0x6E, 0x6E, 0x78), 1.4)
+    } else {
+        (rgb(0xDD, 0xDD, 0xE3), 1.0)
+    };
+    crate::gdiplus::stroke_round(dc, r, ui(5) as f32, line, w);
+}
+
 unsafe fn draw_props(
     dc: HDC,
     props: &[(RECT, Prop)],
@@ -1483,6 +2236,8 @@ unsafe fn draw_props(
         // 选中态：加深底色（悬停盖在它上面时仍保留选中的深浅差别）
         let selected = match *prop {
             Prop::Color(idx) => style.color == COLORS[idx],
+            // 当前色不在预设里，就把这一格点亮，否则界面上看不出选了啥
+            Prop::Custom => !COLORS.contains(&style.color),
             Prop::Round(is_round) => style.round == is_round,
             _ => false,
         };
@@ -1517,6 +2272,20 @@ unsafe fn draw_props(
                 let d = rect(cx - ui(7), cy - ui(7), cx + ui(7), cy + ui(7));
                 round_fill(dc, &d, 8, COLORS[idx]);
                 round_stroke(dc, &d, 8, rgb(0xD8, 0xD8, 0xDE));
+            }
+            Prop::Custom => {
+                // 12 颗色点围成环 = "取色器"，正中间是当前颜色
+                let rr = ui(7) as f32;
+                for k in 0..12 {
+                    let a = k as f32 * 30.0 * core::f32::consts::PI / 180.0;
+                    let px = cx as f32 + rr * a.cos();
+                    let py = cy as f32 + rr * a.sin();
+                    let d = rect(px as i32 - 2, py as i32 - 2, px as i32 + 2, py as i32 + 2);
+                    crate::gdiplus::fill_ellipse(dc, &d, hsv_rgb(k as f32 * 30.0, 1.0, 1.0));
+                }
+                let dot = rect(cx - ui(3), cy - ui(3), cx + ui(3), cy + ui(3));
+                crate::gdiplus::fill_ellipse(dc, &dot, style.color);
+                crate::gdiplus::ellipse(dc, &dot, rgb(0xD8, 0xD8, 0xDE), 1.0);
             }
             Prop::Width => {
                 // 半径体现粗细。按各自的取值区间归一化，滑块感才准：
@@ -1874,6 +2643,17 @@ extern "system" fn overlay_wndproc(
             WM_MOUSEMOVE => {
                 let (x, y) = (lo(lparam), hi(lparam));
 
+                // 取色面板独占鼠标：拖动取色，其余逻辑全部让路
+                if ov.picker.is_some() {
+                    let drag = ov.picker.as_ref().map(|p| p.drag).unwrap_or(0);
+                    if drag != 0 {
+                        ov.picker_drag(x, y);
+                    } else if ov.picker_hover(x, y) {
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                    return 0;
+                }
+
                 // 正在拖选区：移动或改边，其它逻辑都让路
                 if ov.grab != Grab::None {
                     ov.grab_update(x, y);
@@ -1926,7 +2706,7 @@ extern "system" fn overlay_wndproc(
             // 滚轮：光标停在粗细格上时调整线宽
             WM_MOUSEWHEEL => {
                 let delta = ((wparam >> 16) & 0xFFFF) as i16 as i32;
-                if delta != 0 {
+                if delta != 0 && ov.picker.is_none() {
                     if let Some(tool) = ov.tool {
                         let on_width = matches!(
                             ov.props.get(ov.hover_prop.max(0) as usize),
@@ -1949,6 +2729,22 @@ extern "system" fn overlay_wndproc(
                 // 点任何地方都先把正在输入的文字落下来
                 if !ov.text_edit.is_null() {
                     ov.commit_text();
+                }
+                // 吸管模式：点哪取哪，取完就退出
+                if ov.eyedrop {
+                    if let Some((r, g, b)) = sample_pixel(&ov.screen, x + ov.screen.x, y + ov.screen.y)
+                    {
+                        ov.set_color(cref(r, g, b), true);
+                    }
+                    ov.eyedrop = false;
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                    return 0;
+                }
+                // 面板开着时只处理面板
+                if ov.picker.is_some() {
+                    ov.picker_click(x, y);
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                    return 0;
                 }
                 let idx = ov.hit_button(x, y);
                 let pidx = ov.hit_prop(x, y);
@@ -1991,6 +2787,23 @@ extern "system" fn overlay_wndproc(
             }
             WM_LBUTTONUP => {
                 let (x, y) = (lo(lparam), hi(lparam));
+                // 面板里的拖拽收尾：抬手时才记一次最近使用并写配置
+                if ov.picker.is_some() {
+                    let drag = ov.picker.as_ref().map(|p| p.drag).unwrap_or(0);
+                    if drag != 0 {
+                        if let Some(p) = ov.picker.as_mut() {
+                            p.drag = 0;
+                        }
+                        ReleaseCapture();
+                        if let Some(tool) = ov.tool {
+                            let c = ov.styles[tool.idx()].color;
+                            ov.push_recent(c);
+                            save_styles(ov);
+                        }
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                    return 0;
+                }
                 if ov.grab != Grab::None {
                     ov.end_grab();
                     return 0;
@@ -2006,6 +2819,8 @@ extern "system" fn overlay_wndproc(
                         ov.pressed = -1;
                         match act {
                             Act::Tool(t) => {
+                                // 面板里的取色目标跟着工具走，换工具就收起面板
+                                ov.close_picker();
                                 ov.tool = if ov.tool == Some(t) { None } else { Some(t) };
                                 crate::win::trace(&format!("tool -> {:?}", ov.tool));
                                 ov.layout_buttons();
@@ -2067,6 +2882,17 @@ extern "system" fn overlay_wndproc(
                 let vk = wparam as u16 as i32;
                 let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
 
+                // 面板开着：Esc / 回车都只是收起面板，不往下面的分支走
+                if ov.picker.is_some() && (vk == VK_ESCAPE as i32 || vk == VK_RETURN as i32) {
+                    ov.close_picker();
+                    return 0;
+                }
+                if ov.eyedrop && vk == VK_ESCAPE as i32 {
+                    ov.eyedrop = false;
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                    return 0;
+                }
+
                 // 预备状态下的取色快捷键
                 if !ov.locked && ov.tool.is_none() {
                     if vk == VK_SHIFT as i32 {
@@ -2126,26 +2952,53 @@ extern "system" fn overlay_wndproc(
                 ov.cancel_text();
                 0
             }
+            WM_HEX_COMMIT => {
+                ov.commit_hex();
+                0
+            }
+            WM_HEX_CANCEL => {
+                ov.sync_hex_text();
+                SetFocus(hwnd);
+                0
+            }
             // 输入框的配色：字色跟着当前设置走，底色反着来
             // 输入框的背景由子类的 WM_ERASEBKGND 从 back buffer 拷过来，
             // 这里只把字色给它、背景刷成空心，看起来就是"透明"的
             WM_CTLCOLOREDIT => {
                 let hdc = wparam as HDC;
-                let st = ov.styles[Tool::Text.idx()];
-                SetTextColor(hdc, st.color);
+                // Hex 框的字不能跟着当前颜色走：选了白色就白字白底，看不见了
+                if !ov.hex_edit.is_null() && lparam as HWND == ov.hex_edit {
+                    SetTextColor(hdc, rgb(0x1A, 0x1A, 0x20));
+                } else {
+                    let st = ov.styles[Tool::Text.idx()];
+                    SetTextColor(hdc, st.color);
+                }
                 SetBkMode(hdc, TRANSPARENT as i32);
                 GetStockObject(HOLLOW_BRUSH) as LRESULT
             }
             // 换行后把输入框撑高
             WM_COMMAND => {
                 let code = ((wparam >> 16) & 0xFFFF) as u32;
-                if !ov.text_edit.is_null() && lparam as HWND == ov.text_edit && code == EN_CHANGE {
-                    ov.fit_text_box();
+                let target = lparam as HWND;
+                if code == EN_CHANGE {
+                    if !ov.text_edit.is_null() && target == ov.text_edit {
+                        ov.fit_text_box();
+                    } else if !ov.hex_edit.is_null() && target == ov.hex_edit && !ov.hex_sync {
+                        ov.hex_live();
+                    }
                 }
                 0
             }
             // 锁定后：边上显示缩放光标，内部显示移动光标
             WM_SETCURSOR => {
+                // 面板上要箭头，吸管要十字（类光标本来就是自绘十字）
+                if ov.picker.is_some() {
+                    SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_ARROW));
+                    return 1;
+                }
+                if ov.eyedrop {
+                    return DefWindowProcW(hwnd, msg, wparam, lparam);
+                }
                 if ov.locked {
                     let mut pt: POINT = std::mem::zeroed();
                     GetCursorPos(&mut pt);
@@ -2189,6 +3042,7 @@ extern "system" fn overlay_wndproc(
             }
             windows_sys::Win32::UI::WindowsAndMessaging::WM_DESTROY => {
                 ov.destroy_edit();
+                ov.destroy_hex_edit();
                 OVERLAY = None;
                 0
             }
@@ -2197,7 +3051,7 @@ extern "system" fn overlay_wndproc(
     }
 }
 
-fn apply_prop(ov: &mut Overlay, idx: i32) {
+unsafe fn apply_prop(ov: &mut Overlay, idx: i32) {
     let Some(tool) = ov.tool else { return };
     let prop = match ov.props.get(idx as usize) {
         Some((_, p)) => *p,
@@ -2205,10 +3059,16 @@ fn apply_prop(ov: &mut Overlay, idx: i32) {
     };
     crate::win::trace(&format!("prop {prop:?} for {tool:?}"));
 
+    // 打开面板不动样式，也就没有要存的；其余分支统一收尾保存
+    if prop == Prop::Custom {
+        ov.open_picker();
+        return;
+    }
+
     let st = &mut ov.styles[tool.idx()];
     match prop {
         Prop::Color(i) => st.color = COLORS[i.min(COLORS.len() - 1)],
-        Prop::Width => {}
+        Prop::Custom | Prop::Width => {}
         Prop::Filled => st.filled = !st.filled,
         Prop::Dashed => st.dashed = !st.dashed,
         Prop::Round(b) => st.round = b,
@@ -2222,11 +3082,15 @@ fn apply_prop(ov: &mut Overlay, idx: i32) {
 
 /// 把五个工具当前的样式写回配置。只改了某一条也要整组存，
 /// 这样配置文件里始终是完整的一份。
+///
+/// 最近使用色也搭这趟车一起落盘：它在内存里是独立的一份，
+/// 不跟过来的话每次重启就清空了。
 fn save_styles(ov: &Overlay) {
     let mut cfg = crate::config::Config::load();
     for i in 0..5 {
         cfg.styles[i] = Some(ov.styles[i].to_token());
     }
+    cfg.recent_colors = ov.recent.clone();
     if !cfg.save() {
         crate::win::trace("config: 样式保存失败");
     }
@@ -2355,6 +3219,26 @@ pub fn start() -> bool {
         );
         SelectObject(lens_dc, lens_bmp as HGDIOBJ);
 
+        // 取色面板的 HSV 渐变缓存：SV 方块在上、色相条在下，共用一张 DIB
+        let grad_dc = CreateCompatibleDC(desktop_dc);
+        let mut grad_bi: BITMAPINFO = std::mem::zeroed();
+        grad_bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        grad_bi.bmiHeader.biWidth = PK_SV_W;
+        grad_bi.bmiHeader.biHeight = -(PK_SV_H + PK_HUE_H);
+        grad_bi.bmiHeader.biPlanes = 1;
+        grad_bi.bmiHeader.biBitCount = 32;
+        grad_bi.bmiHeader.biCompression = BI_RGB;
+        let mut grad_bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let grad_bmp = CreateDIBSection(
+            desktop_dc,
+            &grad_bi,
+            DIB_RGB_COLORS,
+            &mut grad_bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        SelectObject(grad_dc, grad_bmp as HGDIOBJ);
+
         let mask_dc = CreateCompatibleDC(desktop_dc);
         let mask_bmp = CreateCompatibleBitmap(desktop_dc, 1, 1);
         SelectObject(mask_dc, mask_bmp as HGDIOBJ);
@@ -2423,6 +3307,20 @@ pub fn start() -> bool {
             label_font: ui_font(ui(12)),
             countdown: 0,
             count_font: ui_font(ui(64)),
+            picker: None,
+            hex_edit: std::ptr::null_mut(),
+            hex_font: std::ptr::null_mut(),
+            hex_sync: false,
+            grad_dc,
+            grad_bmp,
+            grad_bits: grad_bits as *mut u32,
+            grad_hue: -1.0,
+            recent: {
+                let mut r = crate::config::Config::load().recent_colors;
+                r.truncate(RECENT_MAX);
+                r
+            },
+            eyedrop: false,
         }));
 
         let hwnd = CreateWindowExW(
