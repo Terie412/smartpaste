@@ -43,6 +43,7 @@ extern "system" {
     fn GdipDeleteBrush(b: *mut core::ffi::c_void) -> i32;
     fn GdipCreatePen1(color: u32, width: f32, unit: i32, pen: *mut *mut core::ffi::c_void) -> i32;
     fn GdipDeletePen(p: *mut core::ffi::c_void) -> i32;
+    fn GdipSetPenLineJoin(pen: *mut core::ffi::c_void, join: i32) -> i32;
 
     fn GdipCreatePath(mode: i32, path: *mut *mut core::ffi::c_void) -> i32;
     fn GdipDeletePath(p: *mut core::ffi::c_void) -> i32;
@@ -169,6 +170,7 @@ extern "system" {
 const SMOOTH_AA: i32 = 4; // SmoothingModeAntiAlias
 const UNIT_PIXEL: i32 = 2; // UnitPixel
 const FILL_WINDING: i32 = 1; // FillModeWinding
+const JOIN_ROUND: i32 = 2; // LineJoinRound
 
 /// 进程启动时调一次。失败也不致命，只是绘制退回硬边。
 pub fn startup() {
@@ -293,8 +295,49 @@ pub unsafe fn fill_polygon(dc: HDC, pts: &[POINT], colorref: u32) {
     GdipDeleteBrush(brush);
 }
 
-pub unsafe fn line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, colorref: u32, width: f32) {
+/// 一段圆弧：外接矩形 + 起始角 + 扫过角度（度，正方向为顺时针，和屏幕坐标一致）
+#[derive(Clone, Copy)]
+pub struct Arc {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub start: f32,
+    pub sweep: f32,
+}
+
+/// 把若干段圆弧首尾接起来描边。
+///
+/// 圆用 GDI+ 的贝塞尔圆弧画，不要用采样点铺折线——半径只有十几像素时，
+/// 每个采样点四舍五入到整像素会在轮廓上留下肉眼可见的平段。
+pub unsafe fn stroke_arcs(dc: HDC, arcs: &[Arc], close: bool, colorref: u32, width: f32) {
+    if arcs.is_empty() {
+        return;
+    }
+    let mut path: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreatePath(FILL_WINDING, &mut path) != 0 {
+        return;
+    }
+    for a in arcs {
+        GdipAddPathArc(path, a.x, a.y, a.w, a.h, a.start, a.sweep);
+    }
+    if close {
+        GdipClosePathFigure(path);
+    }
     let mut pen: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreatePen1(argb(colorref), width, UNIT_PIXEL, &mut pen) != 0 {
+        GdipDeletePath(path);
+        return;
+    }
+    GdipSetPenLineJoin(pen, JOIN_ROUND);
+    with_graphics(dc, |g| {
+        GdipDrawPath(g, pen, path);
+    });
+    GdipDeletePen(pen);
+    GdipDeletePath(path);
+}
+
+pub unsafe fn line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, colorref: u32, width: f32) {    let mut pen: *mut core::ffi::c_void = core::ptr::null_mut();
     if GdipCreatePen1(argb(colorref), width, UNIT_PIXEL, &mut pen) != 0 {
         return;
     }

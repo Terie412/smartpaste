@@ -1550,17 +1550,7 @@ impl Overlay {
         round_fill(dc, &db, ui(6), bg);
         round_stroke(dc, &db, ui(6), rgb(0xDD, 0xDD, 0xE3));
         let (dcx, dcy) = ((db.left + db.right) / 2, (db.top + db.bottom) / 2);
-        crate::gdiplus::line(
-            dc,
-            dcx - ui(5),
-            dcy + ui(5),
-            dcx + ui(4),
-            dcy - ui(4),
-            rgb(0x20, 0x20, 0x28),
-            2.6,
-        );
-        let bulb = rect(dcx + ui(3), dcy - ui(7), dcx + ui(8), dcy - ui(2));
-        crate::gdiplus::fill_round(dc, &bulb, ui(2) as f32, rgb(0x20, 0x20, 0x28));
+        draw_pipette_icon(dc, dcx, dcy, ui(16), rgb(0x1A, 0x1A, 0x20));
 
         // 两个小标题
         let label = crate::gdiplus::FontSpec::new(ui(10) as f32, false, "Microsoft YaHei");
@@ -2197,6 +2187,134 @@ unsafe fn chip_cell(dc: HDC, r: &RECT, color: u32, selected: bool, hover: bool) 
     crate::gdiplus::stroke_round(dc, r, ui(5) as f32, line, w);
 }
 
+/// 调色板图标：正圆在右下缺一角当拇指位，里面五个颜料点。
+///
+/// 轮廓是两段真圆弧（外圆 + 缺口圆）首尾相接，交点用两圆相交公式算。
+/// 不用采样折线：半径只有十几像素，采样点取整后轮廓会出现平段。
+unsafe fn draw_palette_icon(dc: HDC, cx: i32, cy: i32, size: i32, color: u32) {
+    let s = size as f32;
+    let (fx, fy) = (cx as f32, cy as f32);
+    let r = s * 0.42;
+    // 缺口圆：圆心在外圆外侧的右下，半径小，只咬掉一个角
+    let (nx, ny) = (fx + r * 1.02 * 0.72, fy + r * 1.02 * 0.70);
+    let nr = r * 0.26;
+
+    let to_deg = |p: (f32, f32), c: (f32, f32)| (p.1 - c.1).atan2(p.0 - c.0).to_degrees();
+    let norm = |v: f32| {
+        let m = v % 360.0;
+        if m < 0.0 {
+            m + 360.0
+        } else {
+            m
+        }
+    };
+
+    // 两圆交点
+    let (ddx, ddy) = (nx - fx, ny - fy);
+    let d = (ddx * ddx + ddy * ddy).sqrt().max(0.001);
+    let mid = (d * d + r * r - nr * nr) / (2.0 * d);
+    let half = (r * r - mid * mid).max(0.0).sqrt();
+    let (mx, my) = (fx + ddx * mid / d, fy + ddy * mid / d);
+    let (px, py) = (-ddy / d, ddx / d);
+    let p1 = (mx + px * half, my + py * half);
+    let p2 = (mx - px * half, my - py * half);
+
+    let a1 = to_deg(p1, (fx, fy));
+    let a2 = to_deg(p2, (fx, fy));
+    // 保留的是"绕远路"那一段：缺口只占很小一个角
+    let mut sweep = norm(a2 - a1);
+    if sweep <= 180.0 {
+        sweep -= 360.0;
+    }
+    let n1 = to_deg(p2, (nx, ny));
+    // 缺口那段要"朝里鼓"：两个方向的弧各试中点，取离外圆圆心更近的那个
+    let n2 = to_deg(p1, (nx, ny));
+    let mut nsweep = norm(n2 - n1);
+    if nsweep > 180.0 {
+        nsweep -= 360.0;
+    }
+    let bulge = |sw: f32| {
+        let mid = (n1 + sw * 0.5).to_radians();
+        let (mx, my) = (nx + nr * mid.cos(), ny + nr * mid.sin());
+        (mx - fx) * (mx - fx) + (my - fy) * (my - fy)
+    };
+    if bulge(nsweep) > bulge(nsweep + 360.0) {
+        nsweep += 360.0;
+    }
+
+    let arcs = [
+        crate::gdiplus::Arc {
+            x: fx - r,
+            y: fy - r,
+            w: r * 2.0,
+            h: r * 2.0,
+            start: a1,
+            sweep,
+        },
+        crate::gdiplus::Arc {
+            x: nx - nr,
+            y: ny - nr,
+            w: nr * 2.0,
+            h: nr * 2.0,
+            start: n1,
+            sweep: nsweep,
+        },
+    ];
+    crate::gdiplus::stroke_arcs(dc, &arcs, true, color, (s * 0.045).max(1.2));
+
+    // 五个点沿上半圈弧线排开，从左中走到右上
+    let dot = (s * 0.052).max(1.3);
+    for k in 0..5 {
+        let a = (184.0 + k as f32 * 38.0).to_radians();
+        let dx = fx + r * 0.48 * a.cos();
+        let dy = fy + r * 0.48 * a.sin();
+        let d = rect(
+            (dx - dot).round() as i32,
+            (dy - dot).round() as i32,
+            (dx + dot).round() as i32,
+            (dy + dot).round() as i32,
+        );
+        crate::gdiplus::fill_ellipse(dc, &d, color);
+    }
+}
+
+/// 吸管图标：沿 45° 斜放，左下一截笔尖、中间一道卡箍、右上一个圆头。
+///
+/// `size` 是图标的外接方框边长。轴向长度按对角线算（1.32 倍），
+/// 这样斜着放也能把方框填满，不会显得比旁边图标小一圈。
+unsafe fn draw_pipette_icon(dc: HDC, cx: i32, cy: i32, size: i32, color: u32) {
+    let s = size as f32;
+    let len = s * 1.32;
+    // u 是轴向（指向右上），v 与它垂直
+    let a = (-45.0f32).to_radians();
+    let (ux, uy) = (a.cos(), a.sin());
+    let (vx, vy) = (-uy, ux);
+    let (ox, oy) = (cx as f32 - ux * len * 0.5, cy as f32 - uy * len * 0.5);
+
+    let quad = |t0: f32, w0: f32, t1: f32, w1: f32| -> Vec<POINT> {
+        let p = |t: f32, w: f32| POINT {
+            x: (ox + ux * t + vx * w).round() as i32,
+            y: (oy + uy * t + vy * w).round() as i32,
+        };
+        vec![p(t0, w0), p(t1, w1), p(t1, -w1), p(t0, -w0)]
+    };
+    let dot = |t: f32, r: f32| RECT {
+        left: (ox + ux * t - r).round() as i32,
+        top: (oy + uy * t - r).round() as i32,
+        right: (ox + ux * t + r).round() as i32,
+        bottom: (oy + uy * t + r).round() as i32,
+    };
+
+    // 笔尖（圆头）+ 笔杆
+    crate::gdiplus::fill_ellipse(dc, &dot(len * 0.005, len * 0.055), color);
+    crate::gdiplus::fill_polygon(dc, &quad(len * 0.005, len * 0.055, len * 0.48, len * 0.07), color);
+    // 卡箍：横跨笔杆的一道薄条
+    crate::gdiplus::fill_polygon(dc, &quad(len * 0.48, len * 0.165, len * 0.55, len * 0.165), color);
+    // 圆头是沿轴向稍稍拉长的水滴：两个圆叠成胶囊，比正圆更像滴管
+    crate::gdiplus::fill_ellipse(dc, &dot(len * 0.775, len * 0.115), color);
+    crate::gdiplus::fill_ellipse(dc, &dot(len * 0.845, len * 0.115), color);
+}
+
 unsafe fn draw_props(
     dc: HDC,
     props: &[(RECT, Prop)],
@@ -2274,18 +2392,8 @@ unsafe fn draw_props(
                 round_stroke(dc, &d, 8, rgb(0xD8, 0xD8, 0xDE));
             }
             Prop::Custom => {
-                // 12 颗色点围成环 = "取色器"，正中间是当前颜色
-                let rr = ui(7) as f32;
-                for k in 0..12 {
-                    let a = k as f32 * 30.0 * core::f32::consts::PI / 180.0;
-                    let px = cx as f32 + rr * a.cos();
-                    let py = cy as f32 + rr * a.sin();
-                    let d = rect(px as i32 - 2, py as i32 - 2, px as i32 + 2, py as i32 + 2);
-                    crate::gdiplus::fill_ellipse(dc, &d, hsv_rgb(k as f32 * 30.0, 1.0, 1.0));
-                }
-                let dot = rect(cx - ui(3), cy - ui(3), cx + ui(3), cy + ui(3));
-                crate::gdiplus::fill_ellipse(dc, &dot, style.color);
-                crate::gdiplus::ellipse(dc, &dot, rgb(0xD8, 0xD8, 0xDE), 1.0);
+                // 调色板：点开就是取色面板。单色描边，和工具条上其它图标一致
+                draw_palette_icon(dc, cx, cy, ui(20), rgb(0x1A, 0x1A, 0x20));
             }
             Prop::Width => {
                 // 半径体现粗细。按各自的取值区间归一化，滑块感才准：
