@@ -384,8 +384,21 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                 let action = wparam;
                 if action == scroll::ACT_CANCEL {
                     scroll::cancel();
-                } else if let Some(img) = scroll::finish() {
+                } else if let Some(cap) = scroll::finish() {
+                    let img = cap.img;
                     let (w, h) = img.dimensions();
+                    // 一次都没滚过：交出来的就是首屏，跟普通截图没区别，
+                    // 别装作成功复制了长图，直接告诉用户滚轮没生效。
+                    if cap.appends == 0 {
+                        win::trace("scroll: 没有滚过，只截到首屏");
+                        toast(
+                            hwnd,
+                            "没有检测到滚动",
+                            "长截图需要你在选区里滚动鼠标；这次只截到了首屏",
+                            true,
+                        );
+                        return 0;
+                    }
                     if action == scroll::ACT_SAVE {
                         let cfg = config::Config::load();
                         let name = savedlg::default_name();
@@ -539,7 +552,16 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
 fn handle_command(hwnd: HWND, cmd: u32, img: Option<image::RgbaImage>, origin: POINT) {
     if cmd == CMD_SCROLL {
         let rect = overlay::take_rect();
-        if !scroll::start(hwnd, rect) {
+        if scroll::start(hwnd, rect) {
+            // 控制条就在选区旁边，但还是明说一句：用户第一反应往往是
+            // "我该干什么"，而且能确认会话真的起来了
+            toast(
+                hwnd,
+                "滚动截图已开始",
+                "在选区里用滚轮向下滚，拼完点控制条上的「复制」",
+                false,
+            );
+        } else {
             toast(hwnd, "无法开始滚动截图", "选区太小或上一个会话还没结束", true);
         }
         return;

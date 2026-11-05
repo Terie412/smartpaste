@@ -17,14 +17,15 @@ use image::RgbaImage;
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
-    CreateRoundRectRgn, DeleteDC, DeleteObject, EndPaint, GetDC, GetDIBits, ReleaseDC,
-    SelectObject, SetWindowRgn, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
-    DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY, AC_SRC_ALPHA, AC_SRC_OVER,
+    CreateRoundRectRgn, DeleteDC, DeleteObject, EndPaint, GetDC, GetDIBits, GetMonitorInfoW,
+    MonitorFromRect, ReleaseDC, SelectObject, SetWindowRgn, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    PAINTSTRUCT, SRCCOPY, AC_SRC_ALPHA, AC_SRC_OVER,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, KillTimer, LoadCursorW,
     PostMessageW, RegisterClassW, SetCursor, SetTimer, SetWindowDisplayAffinity, ShowWindow,
-    UpdateLayeredWindow, IDC_HAND, SM_CYSCREEN, SW_SHOWNOACTIVATE, ULW_ALPHA,
+    UpdateLayeredWindow, IDC_HAND, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNOACTIVATE, ULW_ALPHA,
     WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_LBUTTONUP,
     WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -38,21 +39,26 @@ const BORDER: i32 = 3;
 /// 框的颜色。写字时是 0xAARRGGBB，所以高字节是 A、低三个字节按 BGR 排。
 const FRAME_COLOR: u32 = 0x00FF_2E63; // #FF2E63
 
-const HUD_W: i32 = 320;
-const HUD_H: i32 = 44;
+const HUD_W: i32 = 420;
+const HUD_H: i32 = 48;
 /// 控制条上三个可点区域的左边界：复制 / 保存 / 取消
-const BTN_COPY_X: i32 = 124;
-const BTN_SAVE_X: i32 = 188;
-const BTN_CANCEL_X: i32 = 252;
+const BTN_COPY_X: i32 = 208;
+const BTN_SAVE_X: i32 = 280;
+const BTN_CANCEL_X: i32 = 352;
 
 /// 抓帧间隔。120ms 约 8Hz：够密，不会漏掉用户一屏一屏的滚动；
 /// 又不至于每帧都去 BitBlt 抢 DWM 的合成结果。
 const POLL_MS: u32 = 120;
-/// 多久没动就认为滚完了，自动收工。
+/// 滚过之后，多久没再滚就认为收工了。
 ///
 /// 别设太短：手动滚的人会停下来看内容，5 秒就收工等于打断阅读。
 /// 8 秒是"停手了"和"在看"之间比较稳的分界。
 const IDLE_MS: u64 = 8000;
+/// 累计增长到多少才算"真的滚了"。桌面噪声能蹭出几像素，这里给一屏的十几分之一。
+const SCROLLED_MIN: u32 = 60;
+/// **一次都没滚过**时的兜底：这时候不能按 IDLE 收工，用户很可能还在
+/// 摆窗口/找位置。给足 90 秒，只有彻底忘了这回事才自动关。
+const STUCK_MS: u64 = 90_000;
 /// 长图最大高度（像素）。再高就不是"长截图"而是录屏了。
 const MAX_H: u32 = 20_000;
 /// 画布内存上限：宽 2560 时 20000 行是 200MB，兜一下
@@ -75,6 +81,14 @@ struct Session {
     pending: Option<Frame>,
     /// 最近一次"拼进新内容"的时刻（毫秒）
     last_change: u64,
+    /// 会话开始的时刻（毫秒），用来判断"压根没滚过"
+    started: u64,
+    /// 成功拼进去的段数（不含第一帧的全量铺底）
+    appends: u32,
+    /// 累计拼进去的行数。用它而不是段数判断"用户到底滚没滚"：
+    /// 桌面本身会动（动画、光标、聊天窗口），偶尔会蹭出几像素的假位移，
+    /// 这种噪声不能算"滚过"。
+    grown: u32,
     /// 已经在等主窗口收尾，别再重复发消息
     closing: bool,
 }
@@ -133,6 +147,9 @@ pub fn start(main: HWND, rect: RECT) -> bool {
             st,
             pending: None,
             last_change: now(),
+            started: now(),
+            appends: 0,
+            grown: 0,
             closing: false,
         });
 
@@ -146,8 +163,14 @@ pub fn start(main: HWND, rect: RECT) -> bool {
     }
 }
 
+/// 收工结果。`appends == 0` 说明用户一次都没滚过，交出去的就是首屏。
+pub struct Capture {
+    pub img: RgbaImage,
+    pub appends: u32,
+}
+
 /// 收工：拆窗口、把拼好的图交出去。没有内容就返回 None。
-pub fn finish() -> Option<RgbaImage> {
+pub fn finish() -> Option<Capture> {
     unsafe {
         let s = S.take()?;
         teardown(&s);
@@ -156,7 +179,8 @@ pub fn finish() -> Option<RgbaImage> {
             s.st.frames,
             s.st.height()
         ));
-        s.st.finish()
+        let appends = s.appends;
+        s.st.finish().map(|img| Capture { img, appends })
     }
 }
 
@@ -265,6 +289,8 @@ unsafe fn on_timer() {
                 match s.st.push(frame) {
                     Push::Appended(bytes) => {
                         s.last_change = now();
+                        s.appends += 1;
+                        s.grown = s.grown.saturating_add(bytes);
                         paint_hud(s.hud, s.st.height(), s.st.frames);
                         crate::win::trace(&format!("scroll: +{bytes}px -> {}", s.st.height()));
                     }
@@ -280,9 +306,22 @@ unsafe fn on_timer() {
         }
     }
 
-    // 停手太久 = 滚完了
-    if !s.closing && s.st.frames > 0 && now().saturating_sub(s.last_change) > IDLE_MS {
-        crate::win::trace("scroll: 空闲超时，自动收工");
+    // 收工判定分两种：
+    //   滚过之后停手 8 秒 → 确实滚完了，直接复制
+    //   一次都没滚过      → 用户可能还在摆窗口，只有 90 秒没动静才关，
+    //                       而且关了也不复制（首屏就是普通截图，没意义）
+    if s.closing {
+        return;
+    }
+    let idle = now().saturating_sub(s.last_change);
+    let scrolled = s.grown >= SCROLLED_MIN;
+    if scrolled && idle > IDLE_MS {
+        crate::win::trace("scroll: 滚完停手，自动收工");
+        req_close(s, ACT_COPY);
+    } else if !scrolled && now().saturating_sub(s.started) > STUCK_MS {
+        crate::win::trace("scroll: 一直没滚，自动关闭");
+        // 走"收工"而不是"取消"：主窗口会把 appends == 0 翻译成一句
+        // "没有检测到滚动"，比默默关掉强
         req_close(s, ACT_COPY);
     }
 }
@@ -384,19 +423,47 @@ unsafe fn blit_layered(hwnd: HWND, screen: HDC, dc: HDC, x: i32, y: i32, w: i32,
     UpdateLayeredWindow(hwnd, screen, &dst, &size, dc, &src, 0, &blend, ULW_ALPHA);
 }
 
-/// 控制条位置：优先选区上方，其次下方，最后贴到屏幕底边。
+/// 控制条位置：优先选区上方，其次下方，都放不下就压在选区内部右下角。
+///
+/// 位置必须夹在**显示器工作区**里。早先按"屏幕高度"算，全屏选区时控制条会落到
+/// 任务栏底下——窗口存在、IsWindowVisible 也是真，但用户根本看不见，
+/// 反馈里就成了"没有控制条"。
 fn hud_pos(rect: &RECT) -> (i32, i32, bool) {
     let gap = 8;
+    let work = work_area(rect);
+    let max_x = (work.right - HUD_W).max(work.left);
+    let x = rect.left.clamp(work.left, max_x);
+
     let above = rect.top - HUD_H - gap;
-    if above >= 0 {
-        return (rect.left, above, true);
+    if above >= work.top {
+        return (x, above, true);
     }
     let below = rect.bottom + gap;
-    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    if below + HUD_H <= screen_h {
-        return (rect.left, below, true);
+    if below + HUD_H <= work.bottom {
+        return (x, below, true);
     }
-    (rect.left, (screen_h - HUD_H).max(0), false)
+    // 四面都顶死（全屏选区）：压在自己右下角。它会盖住一点内容，
+    // 但 `create_hud` 会给它设 WDA_EXCLUDEFROMCAPTURE，不会截进图里。
+    // 全屏选区时 rect.bottom 就是屏幕底边，还得再夹一次工作区底边，
+    // 否则算出来仍然压在任务栏下面
+    let inside_y = (rect.bottom - HUD_H - gap)
+        .min(work.bottom - HUD_H)
+        .max(work.top);
+    let inside_x = (rect.right - HUD_W - gap).max(work.left);
+    (inside_x.min(max_x), inside_y, false)
+}
+
+/// 选区所在显示器的工作区（已扣掉任务栏）
+fn work_area(sel: &RECT) -> RECT {
+    unsafe {
+        let hmon = MonitorFromRect(sel, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(hmon, &mut mi) != 0 {
+            return mi.rcWork;
+        }
+        rect(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+    }
 }
 
 unsafe fn create_hud(rect: &RECT, owner: HWND) -> Option<HWND> {
@@ -476,24 +543,16 @@ unsafe fn paint_hud_dc(hdc: HDC, height: u32, frames: u32) {
     let panel = rect(0, 0, HUD_W, HUD_H);
     crate::gdiplus::fill_round(dc, &panel, 10.0, rgb(0x14, 0x14, 0x18));
 
-    let f_text = crate::gdiplus::FontSpec::new(12.5, false, "Microsoft YaHei");
-    let label = if height == 0 {
-        "滚动目标窗口…".to_string()
+    // 两行：第一行说这是什么，第二行说现在怎么样了 / 下一步该干嘛
+    let f_title = crate::gdiplus::FontSpec::new(12.5, true, "Microsoft YaHei");
+    crate::gdiplus::draw_text(dc, &f_title, rgb(0xF2, 0xF0, 0xF4), 16, 7, "滚动截图");
+    let f_sub = crate::gdiplus::FontSpec::new(10.5, false, "Microsoft YaHei");
+    let sub = if frames <= 1 {
+        "向下滚轮继续，拼完点复制".to_string()
     } else {
-        format!("已拼 {height} px")
+        format!("已拼 {height} px · {frames} 帧")
     };
-    crate::gdiplus::draw_text(dc, &f_text, rgb(0xEC, 0xEC, 0xF2), 14, 14, &label);
-    if frames > 0 && height > 0 {
-        let f_sub = crate::gdiplus::FontSpec::new(10.0, false, "Segoe UI");
-        crate::gdiplus::draw_text(
-            dc,
-            &f_sub,
-            rgb(0x8A, 0x8A, 0x94),
-            14,
-            HUD_H - 15,
-            &format!("{frames} 帧"),
-        );
-    }
+    crate::gdiplus::draw_text(dc, &f_sub, rgb(0x9A, 0x9A, 0xA4), 16, 28, &sub);
 
     let f_btn = crate::gdiplus::FontSpec::new(12.0, true, "Microsoft YaHei");
     // 复制：主操作，实心玫红
