@@ -43,6 +43,7 @@ extern "system" {
     fn GdipDeleteBrush(b: *mut core::ffi::c_void) -> i32;
     fn GdipCreatePen1(color: u32, width: f32, unit: i32, pen: *mut *mut core::ffi::c_void) -> i32;
     fn GdipDeletePen(p: *mut core::ffi::c_void) -> i32;
+    #[allow(dead_code)]
     fn GdipSetPenLineJoin(pen: *mut core::ffi::c_void, join: i32) -> i32;
 
     fn GdipCreatePath(mode: i32, path: *mut *mut core::ffi::c_void) -> i32;
@@ -170,6 +171,8 @@ extern "system" {
 const SMOOTH_AA: i32 = 4; // SmoothingModeAntiAlias
 const UNIT_PIXEL: i32 = 2; // UnitPixel
 const FILL_WINDING: i32 = 1; // FillModeWinding
+// 只有 stroke_arcs 在用；那个原语目前没有调用者，先留着
+#[allow(dead_code)]
 const JOIN_ROUND: i32 = 2; // LineJoinRound
 
 /// 进程启动时调一次。失败也不致命，只是绘制退回硬边。
@@ -310,6 +313,7 @@ pub struct Arc {
 ///
 /// 圆用 GDI+ 的贝塞尔圆弧画，不要用采样点铺折线——半径只有十几像素时，
 /// 每个采样点四舍五入到整像素会在轮廓上留下肉眼可见的平段。
+#[allow(dead_code)]
 pub unsafe fn stroke_arcs(dc: HDC, arcs: &[Arc], close: bool, colorref: u32, width: f32) {
     if arcs.is_empty() {
         return;
@@ -337,7 +341,39 @@ pub unsafe fn stroke_arcs(dc: HDC, arcs: &[Arc], close: bool, colorref: u32, wid
     GdipDeletePath(path);
 }
 
-pub unsafe fn line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, colorref: u32, width: f32) {    let mut pen: *mut core::ffi::c_void = core::ptr::null_mut();
+/// 实心填充若干**闭合环**。每个环由若干段圆弧首尾相接、自动闭合。
+///
+/// 走 FILL_WINDING（非零环绕）：顺时针的环填实，逆时针的环从已填区域里挖掉。
+/// 所以「带缺口的团块 + 内部孔洞」只要按方向摆好环就行，不用自己算交点、
+/// 也不用拿背景色去盖——挖出来的孔是真正的透明，底色/hover 色随便变。
+///
+/// 判断方向：`Arc.sweep` 取正是顺时针（屏幕坐标 y 向下），取负是逆时针。
+#[allow(dead_code)]
+pub unsafe fn fill_rings(dc: HDC, rings: &[Vec<Arc>], colorref: u32) {
+    let mut path: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreatePath(FILL_WINDING, &mut path) != 0 {
+        return;
+    }
+    for ring in rings {
+        for a in ring {
+            GdipAddPathArc(path, a.x, a.y, a.w, a.h, a.start, a.sweep);
+        }
+        GdipClosePathFigure(path);
+    }
+    let mut brush: *mut core::ffi::c_void = core::ptr::null_mut();
+    if GdipCreateSolidFill(argb(colorref), &mut brush) != 0 {
+        GdipDeletePath(path);
+        return;
+    }
+    with_graphics(dc, |g| {
+        GdipFillPath(g, brush, path);
+    });
+    GdipDeleteBrush(brush);
+    GdipDeletePath(path);
+}
+
+pub unsafe fn line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, colorref: u32, width: f32) {
+    let mut pen: *mut core::ffi::c_void = core::ptr::null_mut();
     if GdipCreatePen1(argb(colorref), width, UNIT_PIXEL, &mut pen) != 0 {
         return;
     }

@@ -1,6 +1,6 @@
 //! 工具条图标。
 //!
-//! assets/icons.png 是编译期嵌进来的雪碧图（九格横排，每格 96x96，
+//! assets/icons.png 是编译期嵌进来的雪碧图（十一格横排，每格 96x96，
 //! 源设计是 24x24 网格按 4 倍渲染）。运行时解码、缩到按钮尺寸，
 //! 按目标颜色着色后转成 32bpp DIB 交给 AlphaBlend。
 //!
@@ -23,8 +23,9 @@ pub const SIZE: i32 = 32;
 /// 每格图标的 [默认色, 选中色]。
 ///
 /// 前三个是操作按钮（复制/保存/钉住），选中色无意义，两者相同。
-/// 后六个是标注工具，未选中深灰，选中转玫红。
-const SPECS: [([u8; 3], [u8; 3]); 9] = [
+/// 接着六个是标注工具，未选中深灰，选中转玫红。
+/// 最后一格是属性条上的调色板按钮，颜色跟着当前颜色走，见 `IconSet::make`。
+const SPECS: [([u8; 3], [u8; 3]); 11] = [
     ([0x00, 0x8F, 0xB3], [0x00, 0x8F, 0xB3]), // 复制
     ([0xFF, 0x2E, 0x63], [0xFF, 0x2E, 0x63]), // 保存
     ([0xD9, 0x7E, 0x00], [0xD9, 0x7E, 0x00]), // 钉住
@@ -34,6 +35,8 @@ const SPECS: [([u8; 3], [u8; 3]); 9] = [
     ([0x45, 0x45, 0x4C], [0xFF, 0x2E, 0x63]), // 画笔
     ([0x45, 0x45, 0x4C], [0xFF, 0x2E, 0x63]), // 文本
     ([0x45, 0x45, 0x4C], [0xFF, 0x2E, 0x63]), // 橡皮
+    ([0xFF, 0x2E, 0x63], [0xFF, 0x2E, 0x63]), // 录制
+    ([0x1A, 0x1A, 0x20], [0x1A, 0x1A, 0x20]), // 调色板（属性条，兜底色）
 ];
 
 pub struct Icon {
@@ -72,6 +75,17 @@ impl Drop for Icon {
 pub struct IconSet {
     pub normal: Vec<Icon>,
     pub active: Vec<Icon>,
+    /// 缩放后的白色字形。给"颜色要跟着运行时状态变"的图标用（比如调色板），
+    /// 11 格 x 32x32x4 = 45KB，留着不心疼。
+    glyphs: Vec<image::RgbaImage>,
+}
+
+impl IconSet {
+    /// 用指定颜色现做一张图标。走的是和 `load` 完全相同的着色逻辑，
+    /// 所以边缘抗锯齿、预乘 alpha 都一致。每次调用会新建一张 DIB。
+    pub fn make(&self, idx: usize, color: [u8; 3]) -> Option<Icon> {
+        build(self.glyphs.get(idx)?, color)
+    }
 }
 
 /// 解码失败时返回空集合，调用方画不出图标但不会崩。
@@ -80,7 +94,7 @@ pub fn load() -> IconSet {
         return IconSet::default();
     };
     let sprite = sprite.to_rgba8();
-    if sprite.width() < CELL * 9 {
+    if sprite.width() < CELL * 11 {
         return IconSet::default();
     }
 
@@ -89,6 +103,7 @@ pub fn load() -> IconSet {
         let x = i as u32 * CELL;
         let cell = image::imageops::crop_imm(&sprite, x, 0, CELL, CELL).to_image();
         let scaled = image::imageops::resize(&cell, SIZE as u32, SIZE as u32, FilterType::Lanczos3);
+        set.glyphs.push(scaled.clone());
         if let Some(icon) = build(&scaled, *base) {
             set.normal.push(icon);
         }

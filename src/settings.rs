@@ -23,13 +23,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, LoadCursorW,
-    PostMessageW, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow,
-    CS_HREDRAW, CS_VREDRAW, HCURSOR, HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, SM_CXSCREEN,
-    SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WM_APP,
-    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCALCSIZE,
-    WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CAPTION,
-    WS_EX_TOOLWINDOW, WS_OVERLAPPED, WS_SYSMENU,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, KillTimer,
+    LoadCursorW, PostMessageW, RegisterClassW, SetCursor, SetForegroundWindow, SetTimer,
+    SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, HCURSOR, HTCAPTION, HTCLIENT, IDC_ARROW,
+    IDC_HAND, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_SHOW, WM_APP, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_TOOLWINDOW, WS_OVERLAPPED, WS_SYSMENU,
 };
 
 #[link(name = "dwmapi")]
@@ -141,6 +141,28 @@ const KEY_H: i32 = ui(36);
 const KEY_GAP: i32 = ui(20);
 const KEY_PAD_X: i32 = ui(12);
 
+    // ---- 悬浮注释 ----
+    // 面板上不再常驻解释文字：标题自解释的就让它自己说话，需要补充说明的
+    // 行在鼠标停留后，把注释画回它原来的位置（标题下方那一行）。
+    // 不用跟随鼠标的气泡：气泡会压住相邻行，看起来像在给别的行做注释。
+    // 位置不变还有个好处——文字出现时标题不跳动。
+const TIMER_TIP: usize = 1;
+/// 停留多久才显示注释。太短的话鼠标划过列表会一路闪。
+const TIP_DELAY_MS: u32 = 220;
+
+/// 可弹出注释的行：行中心 y + 文案。文案为空表示这一行不提示
+/// （保存位置那一行的"注释"是路径本身，属于值，不是解释）。
+const TIP_ROWS: [(i32, &str); 5] = [
+    (FPS_CY, "60 fps 更流畅，30 fps 更省资源"),
+    (CD_CY, "留出切窗口、摆好位置的时间"),
+    (SAVE_CY, ""),
+    (ASK_CY, "关掉后直接存到上面的目录"),
+    (OPEN_CY, "录完在资源管理器里定位到该文件"),
+];
+const TIP_FOOTER: &str = "组合键被其他程序占用时会自动还原。";
+/// 底部说明的图标位置：去掉了常驻文字，只留一个 i，停上去才解释
+const INFO_RECT: RECT = rect(PAD - ui(6), FOOTER_Y - ui(5), PAD + ui(40), FOOTER_Y + ui(19));
+
 const fn close_rect() -> RECT {
     rect(
         W - PAD - CLOSE,
@@ -163,6 +185,12 @@ struct State {
     hover_hot: bool,
     hover_reset: bool,
     hover_close: bool,
+    /// 鼠标当前停在哪条可提示的行上（TIP_ROWS 的下标，len() 表示底部 i 图标）
+    hover_row: Option<usize>,
+    /// 已经显示出来的注释对应的行。和 hover_row 分开：停留够久才算显示
+    tip_row: Option<usize>,
+    mouse_x: i32,
+    mouse_y: i32,
     tracking: bool,
     hot_rect: RECT,
     reset_rect: RECT,
@@ -220,6 +248,31 @@ fn is_default(cfg: &Config) -> bool {
 
 fn expand(r: &RECT, d: i32) -> RECT {
     rect(r.left - d, r.top - d, r.right + d, r.bottom + d)
+}
+
+/// 鼠标落在哪条可提示的行上。返回 None 表示不提示。
+/// 判定范围按行中线切（行距 52，半距 26），相邻两行之间不留缝，
+/// 否则鼠标停在交界处注释会闪一下。
+fn hover_tip_row(x: i32, y: i32) -> Option<usize> {
+    for (i, (cy, tip)) in TIP_ROWS.iter().enumerate() {
+        if tip.is_empty() {
+            continue;
+        }
+        if (y - cy).abs() <= ui(21) && x >= PAD && x < CR {
+            return Some(i);
+        }
+    }
+    if pt_in(&INFO_RECT, x, y) {
+        return Some(TIP_ROWS.len());
+    }
+    None
+}
+
+fn tip_text(row: usize) -> &'static str {
+    match TIP_ROWS.get(row) {
+        Some(&(_, t)) => t,
+        None => TIP_FOOTER,
+    }
 }
 
 pub fn open(parent: HWND) {
@@ -290,6 +343,10 @@ pub fn open(parent: HWND) {
             hover_hot: false,
             hover_reset: false,
             hover_close: false,
+            hover_row: None,
+            tip_row: None,
+            mouse_x: 0,
+            mouse_y: 0,
             tracking: false,
             hot_rect: rect(0, 0, 0, 0),
             reset_rect: rect(0, 0, 0, 0),
@@ -369,7 +426,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
-                if (hot || reset || close) && !s.tracking {
+                s.mouse_x = x;
+                s.mouse_y = y;
+
+                // 换了一行：先撤掉旧气泡，再重新计时
+                let row = hover_tip_row(x, y);
+                if row != s.hover_row {
+                    s.hover_row = row;
+                    KillTimer(hwnd, TIMER_TIP);
+                    if s.tip_row.is_some() {
+                        s.tip_row = None;
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                    if row.is_some() {
+                        SetTimer(hwnd, TIMER_TIP, TIP_DELAY_MS, None);
+                    }
+                }
+
+                // 整个客户区都要收 MOUSELEAVE：气泡挂在任意行上，鼠标一离开窗口
+                // 就该收掉，不能只在按钮上才跟踪
+                if !s.tracking {
                     let mut t: TRACKMOUSEEVENT = std::mem::zeroed();
                     t.cbSize = std::mem::size_of::<TRACKMOUSEEVENT>() as u32;
                     t.dwFlags = TME_LEAVE;
@@ -381,11 +457,27 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_MOUSELEAVE => {
                 s.tracking = false;
-                if s.hover_hot || s.hover_reset || s.hover_close {
+                KillTimer(hwnd, TIMER_TIP);
+                if s.hover_hot || s.hover_reset || s.hover_close || s.tip_row.is_some() {
                     s.hover_hot = false;
                     s.hover_reset = false;
                     s.hover_close = false;
+                    s.hover_row = None;
+                    s.tip_row = None;
                     InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+                0
+            }
+            WM_TIMER => {
+                if wparam == TIMER_TIP {
+                    KillTimer(hwnd, TIMER_TIP);
+                    // 计时期间鼠标可能已经挪走，再核对一次
+                    if let Some(row) = s.hover_row {
+                        if hover_tip_row(s.mouse_x, s.mouse_y) == Some(row) {
+                            s.tip_row = Some(row);
+                            InvalidateRect(hwnd, std::ptr::null(), 0);
+                        }
+                    }
                 }
                 0
             }
@@ -849,18 +941,11 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     text(hdc, s.f_action, ACCENT_DEEP, PAD, RECORD_HEAD_Y, "录制");
 
     let (_, row_title_h) = measure(hdc, s.f_h1, "录制帧率");
-    let (_, row_body_h) = measure(hdc, s.f_body, "60 更流畅");
-
-    let top = FPS_CY - (row_title_h + row_body_h) / 2;
+    // 行高就按标题算：注释不常驻，标题要在行内垂直居中。
+    // 原来那句「两行居中」的基准会让整列文字都偏上，去掉注释后特别明显。
+    let top = FPS_CY - row_title_h / 2;
     text(hdc, s.f_h1, TXT_1, PAD, top, "录制帧率");
-    text(
-        hdc,
-        s.f_body,
-        TXT_2,
-        PAD,
-        top + row_title_h,
-        "60 更流畅，30 更省资源",
-    );
+    row_tip(hdc, s, 0, top + row_title_h);
 
     let (fps30, fps60) = segment_rects(hdc, CR, FPS_CY, "30 fps", "60 fps", s.f_body);
     s.fps30 = fps30;
@@ -871,16 +956,9 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
 
     solid(hdc, &rect(PAD, DIV_RECORD_Y, CR, DIV_RECORD_Y + 1), DIVIDER);
 
-    let top = CD_CY - (row_title_h + row_body_h) / 2;
+    let top = CD_CY - row_title_h / 2;
     text(hdc, s.f_h1, TXT_1, PAD, top, "开始前倒计时");
-    text(
-        hdc,
-        s.f_body,
-        TXT_2,
-        PAD,
-        top + row_title_h,
-        "留出切窗口的时间",
-    );
+    row_tip(hdc, s, 1, top + row_title_h);
 
     let (cd0, cd3) = segment_rects(hdc, CR, CD_CY, "立即", "3 秒", s.f_body);
     s.cd0 = cd0;
@@ -892,7 +970,7 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     // ---- 保存设置 ----
     text(hdc, s.f_action, ACCENT_DEEP, PAD, SAVE_HEAD_Y, "保存");
 
-    let top = SAVE_CY - (row_title_h + row_body_h) / 2;
+    let top = SAVE_CY - row_title_h / 2;
     text(hdc, s.f_h1, TXT_1, PAD, top, "保存位置");
     let dir = s.cfg.video_dir().display().to_string();
     text(
@@ -923,16 +1001,9 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
 
     solid(hdc, &rect(PAD, DIV_SAVE_Y, CR, DIV_SAVE_Y + 1), DIVIDER);
 
-    let top = ASK_CY - (row_title_h + row_body_h) / 2;
+    let top = ASK_CY - row_title_h / 2;
     text(hdc, s.f_h1, TXT_1, PAD, top, "录完询问另存为");
-    text(
-        hdc,
-        s.f_body,
-        TXT_2,
-        PAD,
-        top + row_title_h,
-        "否则直接存到上面的目录",
-    );
+    row_tip(hdc, s, 3, top + row_title_h);
 
     let (ask_yes, ask_no) = segment_rects(hdc, CR, ASK_CY, "是", "否", s.f_body);
     s.ask_yes = ask_yes;
@@ -943,16 +1014,9 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
 
     solid(hdc, &rect(PAD, DIV_OPEN_Y, CR, DIV_OPEN_Y + 1), DIVIDER);
 
-    let top = OPEN_CY - (row_title_h + row_body_h) / 2;
+    let top = OPEN_CY - row_title_h / 2;
     text(hdc, s.f_h1, TXT_1, PAD, top, "录完打开目录");
-    text(
-        hdc,
-        s.f_body,
-        TXT_2,
-        PAD,
-        top + row_title_h,
-        "在资源管理器里定位到刚录的文件",
-    );
+    row_tip(hdc, s, 4, top + row_title_h);
 
     let (open_yes, open_no) = segment_rects(hdc, CR, OPEN_CY, "是", "否", s.f_body);
     s.open_yes = open_yes;
@@ -961,22 +1025,41 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     draw_chip(hdc, &open_yes, "是", s.cfg.video_open_dir, s.f_body);
     draw_chip(hdc, &open_no, "否", !s.cfg.video_open_dir, s.f_body);
 
-    // ---- 页脚说明 ----
-    let footer = "组合键被其他程序占用时会自动还原。";
-    let (_, footer_h) = measure(hdc, s.f_body, footer);
+    // ---- 页脚：只留 i 图标，说明改成悬浮 ----
     let icon_size = ui(13);
+    let (_, footer_h) = measure(hdc, s.f_body, "说明");
     let icon_top = FOOTER_Y + (footer_h - icon_size) / 2;
     let icon = rect(PAD, icon_top, PAD + icon_size, icon_top + icon_size);
-    crate::gdiplus::ellipse(hdc, &icon, TXT_2, HAIRLINE);
+    let icon_color = if s.hover_row == Some(TIP_ROWS.len()) {
+        ACCENT_DEEP
+    } else {
+        TXT_2
+    };
+    crate::gdiplus::ellipse(hdc, &icon, icon_color, HAIRLINE);
     text_at(
         hdc,
         s.f_brand,
-        TXT_2,
+        icon_color,
         (icon.left + icon.right) / 2,
         (icon.top + icon.bottom) / 2,
         "i",
     );
-    text(hdc, s.f_body, TXT_2, PAD + ui(18), FOOTER_Y, footer);
+    if s.tip_row == Some(TIP_ROWS.len()) {
+        text(hdc, s.f_body, TXT_2, PAD + ui(18), FOOTER_Y, TIP_FOOTER);
+    }
+}
+
+/// 行注释（也就是原来的灰色小字）只在鼠标停够时间后出现，
+/// 位置仍是标题下方那一行，所以标题不会跳。
+unsafe fn row_tip(hdc: HDC, s: &State, row: usize, y: i32) {
+    if s.tip_row != Some(row) {
+        return;
+    }
+    let tip = tip_text(row);
+    if tip.is_empty() {
+        return;
+    }
+    text(hdc, s.f_body, TXT_2, PAD, y, tip);
 }
 
 pub fn register() {

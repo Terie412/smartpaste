@@ -1,41 +1,54 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 216 24" width="864" height="96">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 264 24" width="1056" height="96">
+  <!--
+    视觉尺寸归一化。Lucide 原始路径各自占位差别很大（copy 顶满 22 格，
+    arrow 只有 12 格），并排放在工具栏里肉眼就能看出大小不齐。
+
+    每个图标包一层 <g transform="translate(tx,ty) scale(k)">：按墨水量
+    （含 2 单位描边）缩放到统一目标尺寸并对中到 12,12。缩放的 k 会把描边
+    一起缩，所以同时把 stroke-width 设成 2/k 补偿回来，结果线宽仍是 2 单位。
+
+    目标墨水尺寸（单位）：方形类 18~19、圆形 19（光学校正略大）、
+    斜向 arrow 15.5、纵长 pin 14.5x20、宽扁 record 21.5x15。
+    改图标时先去掉这层 transform 改原坐标，再按 k = (目标-2)/(当前-2)、
+    tx = 12 - cx*k 重算，不要手调 k。细节见 AGENTS.md 8.1。
+  -->
   <g fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <g transform="translate(0,0)">
-      <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+      <g transform="translate(1.800,1.800) scale(0.8500)" stroke-width="2.353"><rect x="8" y="8" width="14" height="14" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>
     </g>
     <g transform="translate(24,0)">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-      <polyline points="7 10 12 15 17 10"/>
-      <line x1="12" x2="12" y1="15" y2="3"/>
+      <g transform="translate(1.000,1.000) scale(0.9167)" stroke-width="2.182"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></g>
     </g>
     <g transform="translate(48,0)">
-      <path d="M12 17v5"/>
-      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>
+      <g transform="translate(1.393,1.393) scale(0.8839)" stroke-width="2.263"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></g>
     </g>
     <g transform="translate(72,0)">
-      <path d="M7 17 17 7"/>
-      <path d="M9 7h8v8"/>
+      <g transform="translate(-4.041,-3.908) scale(1.3368)" stroke-width="1.496"><path d="M7 17 17 7"/><path d="M9 7h8v8"/></g>
     </g>
-    <g transform="translate(96,0)">
-      <rect width="16" height="16" x="4" y="4" rx="1"/>
-    </g>
+    <g transform="translate(96,0)"><rect width="16" height="16" x="4" y="4" rx="1"/></g>
     <g transform="translate(120,0)">
-      <circle cx="12" cy="12" r="9"/>
+      <g transform="translate(0.667,0.667) scale(0.9444)" stroke-width="2.118"><circle cx="12" cy="12" r="9"/></g>
     </g>
     <g transform="translate(144,0)">
-      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>
-      <path d="m14.5 5.5 3 3"/>
+      <g transform="translate(-0.324,0.898) scale(1.0185)" stroke-width="1.964"><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/><path d="m14.5 5.5 3 3"/></g>
     </g>
     <g transform="translate(168,0)">
-      <polyline points="5 7 5 4 19 4 19 7"/>
-      <line x1="12" x2="12" y1="4" y2="20"/>
-      <line x1="9" x2="15" y1="20" y2="20"/>
+      <g transform="translate(0.151,0.151) scale(0.9874)" stroke-width="2.025"><polyline points="4.2 7 4.2 3.8 19.8 3.8 19.8 7"/><line x1="12" x2="12" y1="3.8" y2="20.2"/><line x1="9" x2="15" y1="20.2" y2="20.2"/></g>
     </g>
     <g transform="translate(192,0)">
-      <path d="m8 20-4.5-4.5a2 2 0 0 1 0-3l8-8a2 2 0 0 1 3 0l5.5 5.5a2 2 0 0 1 0 3L13 20"/>
-      <path d="M20 20H8"/>
-      <path d="m5.5 11.5 8 8"/>
+      <g transform="translate(0.601,0.504) scale(0.9660)" stroke-width="2.070"><path d="m8 20-4.5-4.5a2 2 0 0 1 0-3l8-8a2 2 0 0 1 3 0l5.5 5.5a2 2 0 0 1 0 3L13 20"/><path d="M20 20H8"/><path d="m5.5 11.5 8 8"/></g>
+    </g>
+    <g transform="translate(216,0)"><rect x="2.45" y="5.5" width="15.1" height="13" rx="2.6"/><path d="M18.35 10 21.55 7.2v9.6L18.35 14z"/><circle cx="6" cy="8.9" r="1.2" fill="#FFFFFF" stroke="none"/></g>
+    <!-- 调色板：Material 的实心 palette 路径，填充走彩虹渐变。
+         缺口不能用一个圆去挖——圆和轮廓相交必然是尖角（cusp），32px 下像两根刺。
+         这条路径的缺口是带圆角过渡的"拇指孔"，两端都平滑收进去。
+         四个孔和缺口都用 evenodd 挖空，透出属性条的底色。
+         这格是纯白的，运行时由 icons::make() 按当前颜色现做一张，
+         所以盘子的颜色永远等于当前用的颜色。 -->
+    <g transform="translate(240,0)">
+      <g transform="translate(12 12) scale(1.1111) translate(-12 -12)">
+        <path fill="#FFFFFF" stroke="none" fill-rule="evenodd" d="M17.5 12A1.5 1.5 0 0 1 16 10.5A1.5 1.5 0 0 1 17.5 9A1.5 1.5 0 0 1 19 10.5A1.5 1.5 0 0 1 17.5 12M14.5 8A1.5 1.5 0 0 1 13 6.5A1.5 1.5 0 0 1 14.5 5A1.5 1.5 0 0 1 16 6.5A1.5 1.5 0 0 1 14.5 8M9.5 8A1.5 1.5 0 0 1 8 6.5A1.5 1.5 0 0 1 9.5 5A1.5 1.5 0 0 1 11 6.5A1.5 1.5 0 0 1 9.5 8M5.5 12A1.5 1.5 0 0 1 4 10.5A1.5 1.5 0 0 1 5.5 9A1.5 1.5 0 0 1 7 10.5A1.5 1.5 0 0 1 5.5 12M12 3A9 9 0 0 0 3 12A9 9 0 0 0 12 21C13.1 21 14 20.1 14 19C14 18.44 13.77 17.94 13.4 17.58C13.16 17.31 13 16.95 13 16.55C13 15.7 13.7 15 14.5 15H16.19C18.85 15 21 12.85 21 10.19C21 6.23 17.05 3 12 3Z"/>
+      </g>
     </g>
   </g>
 </svg>

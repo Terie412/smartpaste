@@ -104,6 +104,9 @@ const RADIUS_CHIP: i32 = ui(12);
 const RADIUS_CELL: i32 = ui(8);
 
 // 正方形按钮：宽高一致，比原来的横向长条紧凑
+/// 雪碧图第 11 格：属性条上的调色板按钮
+const ICON_PALETTE: usize = 10;
+
 const BTN_W: i32 = ui(34);
 const BTN_H: i32 = ui(34);
 const GAP: i32 = ui(8);
@@ -1894,6 +1897,7 @@ impl Overlay {
                             x: self.cursor.x - self.screen.x,
                             y: self.cursor.y - self.screen.y,
                         },
+                        &self.icons,
                     );
                 }
             }
@@ -2145,28 +2149,15 @@ unsafe fn draw_bar(
             );
         }
 
-        if b.act == Act::Record {
-            // 雪碧图里没有录制图标，直接画一个实心红点
-            let cx = (b.rect.left + b.rect.right) / 2;
-            let cy = (b.rect.top + b.rect.bottom) / 2;
-            let r = ui(8);
-            crate::gdiplus::fill_round(
-                dc,
-                &rect(cx - r, cy - r, cx + r, cy + r),
-                r as f32,
-                rgb(0xFF, 0x2E, 0x63),
-            );
+        let set = if selected {
+            &icons.active
         } else {
-            let set = if selected {
-                &icons.active
-            } else {
-                &icons.normal
-            };
-            if let Some(icon) = set.get(b.icon) {
-                let ix = (b.rect.left + b.rect.right - crate::icons::SIZE) / 2;
-                let iy = (b.rect.top + b.rect.bottom - crate::icons::SIZE) / 2;
-                icon.draw(dc, ix, iy);
-            }
+            &icons.normal
+        };
+        if let Some(icon) = set.get(b.icon) {
+            let ix = (b.rect.left + b.rect.right - crate::icons::SIZE) / 2;
+            let iy = (b.rect.top + b.rect.bottom - crate::icons::SIZE) / 2;
+            icon.draw(dc, ix, iy);
         }
     }
 
@@ -2185,97 +2176,6 @@ unsafe fn chip_cell(dc: HDC, r: &RECT, color: u32, selected: bool, hover: bool) 
         (rgb(0xDD, 0xDD, 0xE3), 1.0)
     };
     crate::gdiplus::stroke_round(dc, r, ui(5) as f32, line, w);
-}
-
-/// 调色板图标：正圆在右下缺一角当拇指位，里面五个颜料点。
-///
-/// 轮廓是两段真圆弧（外圆 + 缺口圆）首尾相接，交点用两圆相交公式算。
-/// 不用采样折线：半径只有十几像素，采样点取整后轮廓会出现平段。
-unsafe fn draw_palette_icon(dc: HDC, cx: i32, cy: i32, size: i32, color: u32) {
-    let s = size as f32;
-    let (fx, fy) = (cx as f32, cy as f32);
-    let r = s * 0.42;
-    // 缺口圆：圆心在外圆外侧的右下，半径小，只咬掉一个角
-    let (nx, ny) = (fx + r * 1.02 * 0.72, fy + r * 1.02 * 0.70);
-    let nr = r * 0.26;
-
-    let to_deg = |p: (f32, f32), c: (f32, f32)| (p.1 - c.1).atan2(p.0 - c.0).to_degrees();
-    let norm = |v: f32| {
-        let m = v % 360.0;
-        if m < 0.0 {
-            m + 360.0
-        } else {
-            m
-        }
-    };
-
-    // 两圆交点
-    let (ddx, ddy) = (nx - fx, ny - fy);
-    let d = (ddx * ddx + ddy * ddy).sqrt().max(0.001);
-    let mid = (d * d + r * r - nr * nr) / (2.0 * d);
-    let half = (r * r - mid * mid).max(0.0).sqrt();
-    let (mx, my) = (fx + ddx * mid / d, fy + ddy * mid / d);
-    let (px, py) = (-ddy / d, ddx / d);
-    let p1 = (mx + px * half, my + py * half);
-    let p2 = (mx - px * half, my - py * half);
-
-    let a1 = to_deg(p1, (fx, fy));
-    let a2 = to_deg(p2, (fx, fy));
-    // 保留的是"绕远路"那一段：缺口只占很小一个角
-    let mut sweep = norm(a2 - a1);
-    if sweep <= 180.0 {
-        sweep -= 360.0;
-    }
-    let n1 = to_deg(p2, (nx, ny));
-    // 缺口那段要"朝里鼓"：两个方向的弧各试中点，取离外圆圆心更近的那个
-    let n2 = to_deg(p1, (nx, ny));
-    let mut nsweep = norm(n2 - n1);
-    if nsweep > 180.0 {
-        nsweep -= 360.0;
-    }
-    let bulge = |sw: f32| {
-        let mid = (n1 + sw * 0.5).to_radians();
-        let (mx, my) = (nx + nr * mid.cos(), ny + nr * mid.sin());
-        (mx - fx) * (mx - fx) + (my - fy) * (my - fy)
-    };
-    if bulge(nsweep) > bulge(nsweep + 360.0) {
-        nsweep += 360.0;
-    }
-
-    let arcs = [
-        crate::gdiplus::Arc {
-            x: fx - r,
-            y: fy - r,
-            w: r * 2.0,
-            h: r * 2.0,
-            start: a1,
-            sweep,
-        },
-        crate::gdiplus::Arc {
-            x: nx - nr,
-            y: ny - nr,
-            w: nr * 2.0,
-            h: nr * 2.0,
-            start: n1,
-            sweep: nsweep,
-        },
-    ];
-    crate::gdiplus::stroke_arcs(dc, &arcs, true, color, (s * 0.045).max(1.2));
-
-    // 五个点沿上半圈弧线排开，从左中走到右上
-    let dot = (s * 0.052).max(1.3);
-    for k in 0..5 {
-        let a = (184.0 + k as f32 * 38.0).to_radians();
-        let dx = fx + r * 0.48 * a.cos();
-        let dy = fy + r * 0.48 * a.sin();
-        let d = rect(
-            (dx - dot).round() as i32,
-            (dy - dot).round() as i32,
-            (dx + dot).round() as i32,
-            (dy + dot).round() as i32,
-        );
-        crate::gdiplus::fill_ellipse(dc, &d, color);
-    }
 }
 
 /// 吸管图标：沿 45° 斜放，左下一截笔尖、中间一道卡箍、右上一个圆头。
@@ -2322,6 +2222,7 @@ unsafe fn draw_props(
     style: &Style,
     tool: Tool,
     cursor: POINT,
+    icons: &IconSet,
 ) {
     use windows_sys::Win32::Graphics::Gdi::{LineTo, MoveToEx};
 
@@ -2392,8 +2293,16 @@ unsafe fn draw_props(
                 round_stroke(dc, &d, 8, rgb(0xD8, 0xD8, 0xDE));
             }
             Prop::Custom => {
-                // 调色板：点开就是取色面板。单色描边，和工具条上其它图标一致
-                draw_palette_icon(dc, cx, cy, ui(20), rgb(0x1A, 0x1A, 0x20));
+                // 调色板：点开就是取色面板。盘子直接染成当前颜色，
+                // 不点开也能一眼看到现在用的是哪个色。
+                // 走 icons::make 现做一张——雪碧图里那格是纯白的，
+                // 着色逻辑和工具栏图标完全相同，边缘质量一样。
+                let c = style.color;
+                let rgb3 = [c as u8, (c >> 8) as u8, (c >> 16) as u8];
+                if let Some(icon) = icons.make(ICON_PALETTE, rgb3) {
+                    let half = crate::icons::SIZE / 2;
+                    icon.draw(dc, cx - half, cy - half);
+                }
             }
             Prop::Width => {
                 // 半径体现粗细。按各自的取值区间归一化，滑块感才准：
