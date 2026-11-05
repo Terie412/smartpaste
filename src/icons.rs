@@ -28,7 +28,7 @@ pub const SIZE: i32 = 32;
 /// 最后一格是属性条上的调色板按钮，颜色跟着当前颜色走，见 `IconSet::make`。
 ///
 /// 颜色不能写死：工具条底色在深色主题下是深的，原先那个 #45454C 压上去就没了。
-fn specs(t: &Palette) -> [([u8; 3], [u8; 3]); 11] {
+fn specs(t: &Palette) -> [([u8; 3], [u8; 3]); 12] {
     let rgb = |c: u32| [c as u8, (c >> 8) as u8, (c >> 16) as u8];
     let fg = rgb(t.on_surf);
     let ak = rgb(t.accent);
@@ -46,6 +46,7 @@ fn specs(t: &Palette) -> [([u8; 3], [u8; 3]); 11] {
         (fg, ak),                                        // 橡皮
         (ak, ak),                                        // 录制
         (fg, fg),                                        // 调色板（属性条，兜底色）
+        (copy, copy),                                    // 滚动截图
     ]
 }
 

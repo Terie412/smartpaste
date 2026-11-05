@@ -64,6 +64,7 @@ pub const CMD_SAVE: u32 = 2;
 pub const CMD_PIN: u32 = 3;
 pub const CMD_CANCEL: u32 = 4;
 pub const CMD_RECORD: u32 = 5;
+pub const CMD_SCROLL: u32 = 6;
 
 /// 倒计时定时器。用 SetTimer 而不是自己开线程，遮罩本来就有消息循环。
 const TIMER_COUNTDOWN: usize = 0x51;
@@ -328,6 +329,8 @@ pub enum Act {
     Save,
     Pin,
     Record,
+    /// 滚动截图：选区交给 scroll 会话，遮罩本身立刻退场
+    Scroll,
 }
 
 pub struct Button {
@@ -755,6 +758,7 @@ impl Overlay {
             (Act::Tool(Tool::Text), 7),
             (Act::Tool(Tool::Eraser), 8),
             (Act::Record, 9),
+            (Act::Scroll, 11),
             (Act::Save, 1),
             (Act::Pin, 2),
             (Act::Copy, 0),
@@ -1023,8 +1027,8 @@ impl Overlay {
     }
 
     fn finish(&mut self, cmd: u32) {
-        // 录制不截图、不标注，只需要把选区范围交出去，省掉一次整块裁剪
-        if cmd == CMD_RECORD {
+        // 录制和滚动截图都不需要当前这张快照，只要选区范围，省掉一次整块裁剪
+        if cmd == CMD_RECORD || cmd == CMD_SCROLL {
             unsafe {
                 KillTimer(self.hwnd, TIMER_COUNTDOWN);
                 self.countdown = 0;
@@ -1038,7 +1042,7 @@ impl Overlay {
                 }
                 PENDING_CMD = cmd;
                 crate::win::trace(&format!(
-                    "overlay: record sel=({},{},{},{})",
+                    "overlay: cmd {cmd} sel=({},{},{},{})",
                     PENDING_RECT.left, PENDING_RECT.top, PENDING_RECT.right, PENDING_RECT.bottom
                 ));
                 if !MAIN_HWND.is_null() {
@@ -2859,6 +2863,7 @@ extern "system" fn overlay_wndproc(
                             Act::Copy => ov.finish(CMD_COPY),
                             Act::Save => ov.finish(CMD_SAVE),
                             Act::Pin => ov.finish(CMD_PIN),
+                            Act::Scroll => ov.finish(CMD_SCROLL),
                             Act::Record => {
                                 let secs = crate::config::Config::load().record_countdown;
                                 if secs == 0 {

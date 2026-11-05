@@ -25,7 +25,7 @@ BROWSERS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
 ]
 
-WIDTH, HEIGHT = 1056, 96
+WIDTH, HEIGHT = 1152, 96
 # 每格边长，也是 SVG 里 24 单位网格的 4 倍
 CELL = 96
 
@@ -43,6 +43,7 @@ EXPECT = [
     ("eraser", 19.5, 18.0),
     ("record", 21.5, 15.0),
     ("palette", 20.0, 20.0),
+    ("scroll", 15.2, 17.8),
 ]
 
 # alpha 低于这个值当背景，和图标自身的抗锯齿边缘区分开

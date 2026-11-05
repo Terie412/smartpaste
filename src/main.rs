@@ -13,7 +13,9 @@ mod overlay;
 mod pin;
 mod record;
 mod savedlg;
+mod scroll;
 mod settings;
+mod stitch;
 mod theme;
 mod win;
 
@@ -38,7 +40,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_TIMER, WNDCLASSW,
 };
 
-use overlay::{CMD_CANCEL, CMD_COPY, CMD_PIN, CMD_RECORD, CMD_SAVE, WM_SNAP_DONE};
+use overlay::{CMD_CANCEL, CMD_COPY, CMD_PIN, CMD_RECORD, CMD_SAVE, CMD_SCROLL, WM_SNAP_DONE};
 use record::session;
 use win::{hinstance, to_wide};
 
@@ -130,6 +132,7 @@ fn main() {
     overlay::register();
     pin::register();
     settings::register();
+    scroll::register();
     session::register();
 
     unsafe {
@@ -190,6 +193,21 @@ fn main() {
 
         // 调试入口：--auto 让程序 1.5s 后自己投递一次热键消息，
         // 用来验证消息链路（模拟按键在某些环境里注入不进去）。
+        // 调试入口：--scroll x y w h 直接开滚动截图会话，跳过框选。
+        // 自动化测试要发滚轮事件，没法同时去点工具条上的按钮。
+        if let Some(i) = argv.iter().position(|a| a == "--scroll") {
+            let v: Vec<i32> = argv
+                .iter()
+                .skip(i + 1)
+                .take(4)
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if v.len() == 4 {
+                let r = win::rect(v[0], v[1], v[0] + v[2], v[1] + v[3]);
+                scroll::start(hwnd, r);
+            }
+        }
+
         if std::env::args().any(|a| a == "--auto") {
             use windows_sys::Win32::System::Threading::GetCurrentThreadId;
             use windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
@@ -360,6 +378,65 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                 win::trace("hotkey: 录制中，暂时注销");
                 0
             }
+            // 滚动截图会话收尾：控制条（或空闲超时）发来一个动作，
+            // 这里取图、复制/保存，然后把会话拆掉。
+            scroll::WM_SCROLL_ACTION => {
+                let action = wparam;
+                if action == scroll::ACT_CANCEL {
+                    scroll::cancel();
+                } else if let Some(img) = scroll::finish() {
+                    let (w, h) = img.dimensions();
+                    if action == scroll::ACT_SAVE {
+                        let cfg = config::Config::load();
+                        let name = savedlg::default_name();
+                        match savedlg::ask(hwnd, cfg.save_dir.as_deref(), &name) {
+                            Some(path) => {
+                                if img.save(&path).is_ok() {
+                                    let mut cfg = cfg;
+                                    cfg.save_dir = path
+                                        .parent()
+                                        .map(|d| d.display().to_string())
+                                        .filter(|d| !d.is_empty());
+                                    cfg.save();
+                                    win::trace(&format!("scroll: saved {}", path.display()));
+                                } else {
+                                    win::trace(&format!("scroll: 写入失败 {}", path.display()));
+                                    toast(hwnd, "保存失败", &path.display().to_string(), true);
+                                }
+                            }
+                            // 取消了另存为也别把这一趟白干——退回"复制到剪贴板"，
+                            // 至少要能粘出来，否则用户滚了半天什么都没剩下。
+                            None => {
+                                win::trace("scroll: 取消保存，改复制到剪贴板");
+                                match clipboard::copy_image(&img) {
+                                    Ok(()) => toast(
+                                        hwnd,
+                                        "已取消保存",
+                                        &format!("长截图 {w} × {h} 已放进剪贴板"),
+                                        false,
+                                    ),
+                                    Err(e) => {
+                                        win::trace(&format!("scroll: copy failed {e}"));
+                                        toast(hwnd, "复制失败", &e, true);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        match clipboard::copy_image(&img) {
+                            Ok(()) => {
+                                win::trace(&format!("scroll: copied {w}x{h}"));
+                                toast(hwnd, "长截图已复制", &format!("{w} × {h}"), false);
+                            }
+                            Err(e) => {
+                                win::trace(&format!("scroll: copy failed {e}"));
+                                toast(hwnd, "复制失败", &e, true);
+                            }
+                        }
+                    }
+                }
+                0
+            }
             settings::WM_HOTKEY_CHANGED => {
                 let cfg = config::Config::load();
                 let (old_mod, old_vk) = ACTIVE_HOTKEY;
@@ -460,6 +537,14 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
 }
 
 fn handle_command(hwnd: HWND, cmd: u32, img: Option<image::RgbaImage>, origin: POINT) {
+    if cmd == CMD_SCROLL {
+        let rect = overlay::take_rect();
+        if !scroll::start(hwnd, rect) {
+            toast(hwnd, "无法开始滚动截图", "选区太小或上一个会话还没结束", true);
+        }
+        return;
+    }
+
     if cmd == CMD_RECORD {
         let rect = overlay::take_rect();
         let cfg = config::Config::load();
