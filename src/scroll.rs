@@ -23,7 +23,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     PAINTSTRUCT, SRCCOPY, AC_SRC_ALPHA, AC_SRC_OVER,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, KillTimer, LoadCursorW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, KillTimer, LoadCursorW,
     PostMessageW, RegisterClassW, SetCursor, SetTimer, SetWindowDisplayAffinity, ShowWindow,
     UpdateLayeredWindow, IDC_HAND, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNOACTIVATE, ULW_ALPHA,
     WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_LBUTTONUP,
@@ -33,6 +33,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const FRAME_CLASS: &str = "SmartPasteScrollFrame";
 const HUD_CLASS: &str = "SmartPasteScrollHud";
+const PREVIEW_CLASS: &str = "SmartPasteScrollPreview";
 
 /// 细框贴边厚度，整圈在选区外面
 const BORDER: i32 = 3;
@@ -45,6 +46,18 @@ const HUD_H: i32 = 48;
 const BTN_COPY_X: i32 = 208;
 const BTN_SAVE_X: i32 = 280;
 const BTN_CANCEL_X: i32 = 352;
+
+// ---- 预览面板 ----
+/// 选区外面有空间时，把已拼好的长图缩略贴在那儿。
+/// 尺寸的下限就是"再小就什么都看不清"，不达标干脆不显示。
+const PV_MIN_W: i32 = 168;
+const PV_MIN_H: i32 = 220;
+const PV_MAX_W: i32 = 360;
+/// 竖着最多这么高；长图再长也只是缩得更细，面板不跟着无限长
+const PV_MAX_H: i32 = 760;
+const PV_PAD: i32 = 10;
+const PV_HEAD: i32 = 28;
+const PV_FOOT: i32 = 24;
 
 /// 抓帧间隔。120ms 约 8Hz：够密，不会漏掉用户一屏一屏的滚动；
 /// 又不至于每帧都去 BitBlt 抢 DWM 的合成结果。
@@ -76,6 +89,8 @@ struct Session {
     rect: RECT,
     frame_win: HWND,
     hud: HWND,
+    /// 预览面板，选区外面没地方放时为 null
+    preview: HWND,
     st: Stitcher,
     /// 最近一次抓到、还没确认稳定的帧
     pending: Option<Frame>,
@@ -97,8 +112,12 @@ static mut S: Option<Session> = None;
 
 pub fn register() {
     unsafe {
-        for (class, proc) in [(FRAME_CLASS, frame_proc as WNDPROC), (HUD_CLASS, hud_proc as WNDPROC)]
-        {
+        let classes = [
+            (FRAME_CLASS, frame_proc as WNDPROC),
+            (HUD_CLASS, hud_proc as WNDPROC),
+            (PREVIEW_CLASS, preview_proc as WNDPROC),
+        ];
+        for (class, proc) in classes {
             let wide = to_wide(class);
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(proc),
@@ -135,6 +154,8 @@ pub fn start(main: HWND, rect: RECT) -> bool {
             crate::win::trace("scroll: 控制条创建失败");
             return false;
         };
+        // 选区外面有地方就挂一块预览；没有（接近满屏）就跳过，不勉强
+        let preview = create_preview(&rect);
 
         let cap = ((MAX_BYTES / (w as u64 * 4)).max(200) as u32).min(MAX_H);
         let st = Stitcher::new(w as u32, h as u32, cap);
@@ -144,6 +165,7 @@ pub fn start(main: HWND, rect: RECT) -> bool {
             rect,
             frame_win,
             hud,
+            preview,
             st,
             pending: None,
             last_change: now(),
@@ -155,6 +177,9 @@ pub fn start(main: HWND, rect: RECT) -> bool {
 
         SetTimer(frame_win, 1, POLL_MS, None);
         paint_hud(hud, 0, 0);
+        if let Some(sess) = S.as_ref() {
+            paint_preview(sess.preview, &sess.st);
+        }
         crate::win::trace(&format!(
             "scroll: 开始 {}x{} at ({},{}) 上限 {}",
             w, h, rect.left, rect.top, cap
@@ -195,6 +220,9 @@ pub fn cancel() {
 
 unsafe fn teardown(s: &Session) {
     KillTimer(s.frame_win, 1);
+    if !s.preview.is_null() {
+        DestroyWindow(s.preview);
+    }
     if !s.hud.is_null() {
         DestroyWindow(s.hud);
     }
@@ -286,13 +314,22 @@ unsafe fn on_timer() {
         // 直接抓一帧就拼是不行的：滚动惯性中间那些帧会拼出重影。
         Some(prev) => {
             if stitch::similar(&prev, &frame) {
+                // 首帧是把整屏铺上去，不算"用户滚了"——否则会话一启动就
+                // 被当成"已经滚过"，8 秒后自动收工，用户还没开始就结束了
+                let first = s.st.frames == 0;
                 match s.st.push(frame) {
-                    Push::Appended(bytes) => {
-                        s.last_change = now();
-                        s.appends += 1;
-                        s.grown = s.grown.saturating_add(bytes);
+                    Push::Appended(bytes) | Push::Prepended(bytes) => {
+                        if !first {
+                            s.last_change = now();
+                            s.appends += 1;
+                            s.grown = s.grown.saturating_add(bytes);
+                            crate::win::trace(&format!(
+                                "scroll: +{bytes}px -> {}",
+                                s.st.height()
+                            ));
+                        }
                         paint_hud(s.hud, s.st.height(), s.st.frames);
-                        crate::win::trace(&format!("scroll: +{bytes}px -> {}", s.st.height()));
+                        paint_preview(s.preview, &s.st);
                     }
                     Push::Full => {
                         crate::win::trace("scroll: 到高度上限");
@@ -600,6 +637,184 @@ unsafe fn paint_hud_dc(hdc: HDC, height: u32, frames: u32) {
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
+}
+
+// ---------------------------------------------------------------- 预览面板
+
+/// 在选区外面找一块地方放预览：右 → 左 → 下 → 上。
+///
+/// 都塞不下就返回 None —— 用户明确说过"接近满屏就不预览算了"，
+/// 强行塞一块只会盖住要截的内容。
+fn preview_rect(sel: &RECT, work: &RECT) -> Option<RECT> {
+    let gap = 12;
+    let avail_h = (work.bottom - sel.top).min(PV_MAX_H);
+    let h = (sel.bottom - sel.top).min(avail_h);
+    if h < PV_MIN_H {
+        return None;
+    }
+
+    // 右侧
+    let x = sel.right + gap;
+    let w = (work.right - gap) - x;
+    if w >= PV_MIN_W {
+        let w = w.min(PV_MAX_W);
+        return Some(rect(x, sel.top, x + w, sel.top + h));
+    }
+
+    // 左侧
+    let w = sel.left - gap - (work.left + gap);
+    if w >= PV_MIN_W {
+        let w = w.min(PV_MAX_W);
+        return Some(rect(sel.left - gap - w, sel.top, sel.left - gap, sel.top + h));
+    }
+
+    // 下方：横条，长图靠纵向缩放体现，所以给的高度不能太抠
+    let y = sel.bottom + gap;
+    let hb = (work.bottom - gap) - y;
+    if hb >= PV_MIN_H {
+        let w = (sel.right - sel.left).min(PV_MAX_W + 160);
+        let x = sel.left.min(work.right - gap - w).max(work.left + gap);
+        return Some(rect(x, y, x + w, y + hb.min(260)));
+    }
+
+    // 上方
+    let ha = sel.top - gap - (work.top + gap);
+    if ha >= PV_MIN_H {
+        let w = (sel.right - sel.left).min(PV_MAX_W + 160);
+        let x = sel.left.min(work.right - gap - w).max(work.left + gap);
+        let h = ha.min(260);
+        return Some(rect(x, sel.top - gap - h, x + w, sel.top - gap));
+    }
+
+    None
+}
+
+unsafe fn create_preview(sel: &RECT) -> HWND {
+    let work = work_area(sel);
+    let Some(r) = preview_rect(sel, &work) else {
+        crate::win::trace("scroll: 选区外没空间，跳过预览");
+        return std::ptr::null_mut();
+    };
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let class = to_wide(PREVIEW_CLASS);
+    let title = to_wide("SmartPaste 长图预览");
+    let hwnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        class.as_ptr(),
+        title.as_ptr(),
+        WS_POPUP,
+        r.left,
+        r.top,
+        w,
+        h,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        hinstance(),
+        std::ptr::null(),
+    );
+    if hwnd.is_null() {
+        return hwnd;
+    }
+    let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, 16, 16);
+    SetWindowRgn(hwnd, rgn, 0);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    crate::win::trace(&format!("scroll: 预览面板 {w}x{h} at ({},{})", r.left, r.top));
+    hwnd
+}
+
+/// 刷预览。只在"拼进新内容"之后调，别放进定时器里空转。
+unsafe fn paint_preview(hwnd: HWND, st: &Stitcher) {
+    if hwnd.is_null() {
+        return;
+    }
+    let hdc = GetDC(hwnd);
+    if hdc.is_null() {
+        return;
+    }
+    let mut rc: RECT = std::mem::zeroed();
+    GetClientRect(hwnd, &mut rc);
+    paint_preview_dc(hdc, rc.right, rc.bottom, Some(st));
+    ReleaseDC(hwnd, hdc);
+}
+
+unsafe fn paint_preview_dc(hdc: HDC, w: i32, h: i32, st: Option<&Stitcher>) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    crate::gdiplus::rect_fill(hdc, &rect(0, 0, w, h), rgb(0x14, 0x14, 0x18));
+
+    let f = crate::gdiplus::FontSpec::new(10.5, false, "Microsoft YaHei");
+    crate::gdiplus::draw_text(hdc, &f, rgb(0x9A, 0x9A, 0xA4), PV_PAD, 8, "长图预览");
+    let Some(st) = st else { return };
+    let (sw, sh) = (st.width() as i32, st.height() as i32);
+    if sw <= 0 || sh <= 0 {
+        crate::gdiplus::draw_text(hdc, &f, rgb(0x6E, 0x6E, 0x78), PV_PAD, PV_HEAD + 6, "滚轮开始采集");
+        return;
+    }
+
+    let iw = w - PV_PAD * 2;
+    let ih = h - PV_HEAD - PV_FOOT;
+    if iw < 8 || ih < 8 {
+        return;
+    }
+    // 等比缩进可用区域，长图自然就是很细的一条——这正是"长"的直观体现
+    let k = (iw as f32 / sw as f32).min(ih as f32 / sh as f32);
+    let dw = ((sw as f32 * k) as i32).clamp(1, iw);
+    let dh = ((sh as f32 * k) as i32).clamp(1, ih);
+    let dx = PV_PAD + (iw - dw) / 2;
+    // 贴顶而不是居中：长图一直在往下长，顶端不动才不会看着它整体往下滑
+    let dy = PV_HEAD;
+
+    let screen = GetDC(std::ptr::null_mut());
+    let mem = CreateCompatibleDC(screen);
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bi.bmiHeader.biWidth = dw;
+    bi.bmiHeader.biHeight = -dh;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+    let bmp = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+    if !bmp.is_null() && !bits.is_null() {
+        let old = SelectObject(mem, bmp as HGDIOBJ);
+        let buf = std::slice::from_raw_parts_mut(bits as *mut u8, (dw * dh * 4) as usize);
+        st.sample_bgra(buf, dw as u32, dh as u32);
+        BitBlt(hdc, dx, dy, dw, dh, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bmp as HGDIOBJ);
+    }
+    DeleteDC(mem);
+    ReleaseDC(std::ptr::null_mut(), screen);
+
+    crate::gdiplus::rect_stroke(hdc, &rect(dx, dy, dx + dw, dy + dh), rgb(0x3A, 0x39, 0x44), 1.0);
+
+    let size = format!("{sw} × {sh}");
+    let (tw, th) = crate::gdiplus::measure_text(hdc, &f, &size);
+    crate::gdiplus::draw_text(
+        hdc,
+        &f,
+        rgb(0x8A, 0x8A, 0x94),
+        (w - tw) / 2,
+        h - PV_FOOT + (PV_FOOT - th) / 2,
+        &size,
+    );
+}
+
+unsafe extern "system" fn preview_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
+    match msg {
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let st = S.as_ref().map(|s| &s.st);
+            paint_preview_dc(hdc, rc.right, rc.bottom, st);
+            EndPaint(hwnd, &ps);
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 // ---------------------------------------------------------------- 窗口过程
