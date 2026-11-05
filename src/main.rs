@@ -14,6 +14,7 @@ mod pin;
 mod record;
 mod savedlg;
 mod settings;
+mod theme;
 mod win;
 
 use std::path::PathBuf;
@@ -81,6 +82,9 @@ fn main() {
     if !ensure_single_instance() {
         return;
     }
+
+    // 主题要在任何窗口创建之前定下来：遮罩第一次弹出就该是对的深浅
+    theme::set_mode(config::Config::load().theme);
 
     // 数据链路自检：不依赖任何交互，验证 抓屏 -> 裁剪 -> DIB -> 剪贴板 -> PNG
     if std::env::args().any(|a| a == "--selftest") {
@@ -388,6 +392,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                         video_ask_save: cfg.video_ask_save,
                         video_open_dir: cfg.video_open_dir,
                         recent_colors: cfg.recent_colors.clone(),
+                        theme: cfg.theme,
                     }
                     .save();
                     win::trace(&format!(
@@ -404,6 +409,7 @@ extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                             video_ask_save: cfg.video_ask_save,
                             video_open_dir: cfg.video_open_dir,
                             recent_colors: cfg.recent_colors.clone(),
+                            theme: cfg.theme,
                         }
                         .hotkey_text(),
                         back

@@ -1,11 +1,12 @@
 //! 配置文件读写。
 //!
 //! 放在 `%APPDATA%\smartpaste\config.txt`，纯 key=value 文本，
-//! 出问题能直接拿记事本改。目前只有热键一项，够用。
+//! 出问题能直接拿记事本改。
 //!
 //! 修饰键用 Win32 的位掩码：Alt=1、Ctrl=2、Shift=4、Win=8，
 //! 跟 RegisterHotKey 的参数直接对应，读出来不用转换。
 
+use crate::theme::Mode;
 use std::path::PathBuf;
 
 pub const MOD_ALT: u32 = 1;
@@ -37,6 +38,8 @@ pub struct Config {
     pub video_open_dir: bool,
     /// 取色面板里"最近使用"的颜色（COLORREF），新的在前
     pub recent_colors: Vec<u32>,
+    /// 界面主题：浅色 / 深色 / 跟随系统
+    pub theme: Mode,
 }
 
 impl Default for Config {
@@ -52,6 +55,8 @@ impl Default for Config {
             video_ask_save: false,
             video_open_dir: true,
             recent_colors: Vec::new(),
+            // 默认跟随系统：新用户装完不用进设置也不会觉得界面突兀
+            theme: Mode::System,
         }
     }
 }
@@ -144,6 +149,12 @@ impl Config {
                     let v = v.trim();
                     cfg.video_open_dir = v == "1" || v.eq_ignore_ascii_case("true");
                 }
+                // 认不出来的值留在默认（跟随系统），不报错也不改文件
+                "theme" => {
+                    if let Some(m) = Mode::parse(v) {
+                        cfg.theme = m;
+                    }
+                }
                 "recent" => {
                     cfg.recent_colors.clear();
                     for part in v.split(',') {
@@ -176,8 +187,10 @@ impl Config {
         }
         // style.0..4 对应 形状 / 箭头 / 画笔 / 文本 / 橡皮
         let mut text = format!(
-            "; smartpaste 配置\nhotkey_mod={}\nhotkey_vk={}\n",
-            self.hotkey_mod, self.hotkey_vk
+            "; smartpaste 配置\nhotkey_mod={}\nhotkey_vk={}\ntheme={}\n",
+            self.hotkey_mod,
+            self.hotkey_vk,
+            self.theme.key()
         );
         if let Some(d) = &self.save_dir {
             text.push_str(&format!("save_dir={d}\n"));

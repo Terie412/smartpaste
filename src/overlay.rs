@@ -12,6 +12,7 @@
 use crate::capture::{self, Screen};
 use crate::edit::{self, Doc, Kind, Shape, Style};
 use crate::icons::IconSet;
+use crate::theme;
 use crate::win::{delete_font, hinstance, pt_in, rect, to_wide, ui_font, ui_font_w};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
@@ -97,8 +98,6 @@ const fn ui(v: i32) -> i32 {
 
 // 圆角直径（GDI+ 里再除以 2 得到半径）
 const RADIUS_BAR: i32 = ui(16);
-/// 选中态底色。不用描边——深色边框在白色工具条上太跳，加深底色就够了。
-const SEL_BG: u32 = 0x00EB_E3E3; // #E3E3EB
 const RADIUS_CHIP: i32 = ui(12);
 /// 属性格底块用的小圆角。36px 的格子上用 RADIUS_CHIP 会糊成胶囊。
 const RADIUS_CELL: i32 = ui(8);
@@ -1508,13 +1507,15 @@ impl Overlay {
 
         let Some(pk) = self.picker.as_ref() else { return };
         let (cw, ch) = (PK_SV_W, PK_SV_H);
+        let t = theme::c();
 
         // 卡片。投影省了：面板下方常常是没有蒙层的截图，靠描边就够分清层次
-        round_fill(dc, &pk.rect, ui(10), 0x00FF_FFFF);
-        round_stroke(dc, &pk.rect, ui(10), rgb(0xD6, 0xD6, 0xDC));
+        round_fill(dc, &pk.rect, ui(10), t.panel_bg);
+        round_stroke(dc, &pk.rect, ui(10), t.panel_border);
 
         BitBlt(dc, pk.sv.left, pk.sv.top, cw, ch, self.grad_dc, 0, 0, SRCCOPY);
-        crate::gdiplus::rect_stroke(dc, &pk.sv, 0x00D8D8DE, 1.0);
+        // 渐变块和色相条的描边跟着主题走：白描边压在深色卡片上会像一条亮边
+        crate::gdiplus::rect_stroke(dc, &pk.sv, t.field_border, 1.0);
         BitBlt(
             dc,
             pk.hue.left,
@@ -1526,7 +1527,7 @@ impl Overlay {
             ch,
             SRCCOPY,
         );
-        crate::gdiplus::rect_stroke(dc, &pk.hue, 0x00D8D8DE, 1.0);
+        crate::gdiplus::rect_stroke(dc, &pk.hue, t.field_border, 1.0);
 
         // SV 上的取色环：外白内黑，任何底色上都看得见
         let sx = pk.sv.left + (pk.s * (cw - 1) as f32) as i32;
@@ -1544,23 +1545,23 @@ impl Overlay {
 
         // Hex 输入框底色。字由 EDIT 自己画，擦背景时从 back buffer 拷，
         // 所以这里画的圆角能原样透出来。
-        round_fill(dc, &pk.field, ui(6), rgb(0xF1, 0xF1, 0xF5));
-        round_stroke(dc, &pk.field, ui(6), rgb(0xDD, 0xDD, 0xE3));
+        round_fill(dc, &pk.field, ui(6), t.field_bg);
+        round_stroke(dc, &pk.field, ui(6), t.field_border);
 
         // 吸管按钮
         let db = pk.dropper;
-        let bg = if pk.hover_drop { rgb(0xE7, 0xE7, 0xEE) } else { rgb(0xF1, 0xF1, 0xF5) };
+        let bg = if pk.hover_drop { t.field_hover } else { t.field_bg };
         round_fill(dc, &db, ui(6), bg);
-        round_stroke(dc, &db, ui(6), rgb(0xDD, 0xDD, 0xE3));
+        round_stroke(dc, &db, ui(6), t.field_border);
         let (dcx, dcy) = ((db.left + db.right) / 2, (db.top + db.bottom) / 2);
-        draw_pipette_icon(dc, dcx, dcy, ui(16), rgb(0x1A, 0x1A, 0x20));
+        draw_pipette_icon(dc, dcx, dcy, ui(16), t.on_surf);
 
         // 两个小标题
         let label = crate::gdiplus::FontSpec::new(ui(10) as f32, false, "Microsoft YaHei");
         crate::gdiplus::draw_text(
             dc,
             &label,
-            rgb(0x9A, 0x9A, 0xA4),
+            t.txt3,
             pk.sv.left,
             pk.field.bottom + PK_GAP,
             "最近",
@@ -1570,14 +1571,14 @@ impl Overlay {
         for (i, r) in pk.recent_rects.iter().enumerate() {
             match self.recent.get(i) {
                 Some(c) => chip_cell(dc, r, *c, *c == color, pk.hover == i as i32),
-                None => round_fill(dc, r, ui(5), rgb(0xF4, 0xF4, 0xF7)),
+                None => round_fill(dc, r, ui(5), t.field_bg),
             }
         }
         if let Some((first, _)) = pk.presets.first() {
             crate::gdiplus::draw_text(
                 dc,
                 &label,
-                rgb(0x9A, 0x9A, 0xA4),
+                t.txt3,
                 pk.sv.left,
                 first.top - PK_LABEL_H,
                 "预设",
@@ -2104,12 +2105,13 @@ unsafe fn draw_bar(
         buttons[buttons.len() - 1].rect.right,
         buttons[0].rect.bottom,
     );
-    round_fill(dc, &bar, RADIUS_BAR, rgb(0xFF, 0xFF, 0xFF));
+    let t = theme::c();
+    round_fill(dc, &bar, RADIUS_BAR, t.surf);
 
     // 工具区 / 操作区之间的分隔线
     let split = 5usize;
     if split < buttons.len() {
-        let sep_brush = CreateSolidBrush(rgb(0xD0, 0xD0, 0xD6));
+        let sep_brush = CreateSolidBrush(t.surf_sep);
         let x = buttons[split].rect.left;
         let sep = rect(x, bar.top + ui(8), x + 1, bar.bottom - ui(8));
         FillRect(dc, &sep, sep_brush);
@@ -2123,7 +2125,7 @@ unsafe fn draw_bar(
             _ => false,
         };
         if selected {
-            // 选中：只加深底色，不描边。深色描边在白工具栏上太抢眼。
+            // 选中：只加深底色，不描边。描边在浅色工具条上太抢眼
             round_fill(
                 dc,
                 &rect(
@@ -2133,7 +2135,7 @@ unsafe fn draw_bar(
                     b.rect.bottom - ui(3),
                 ),
                 RADIUS_CHIP,
-                SEL_BG,
+                t.surf_sel,
             );
         } else if hover == idx || pressed == idx {
             round_fill(
@@ -2145,7 +2147,7 @@ unsafe fn draw_bar(
                     b.rect.bottom - ui(3),
                 ),
                 RADIUS_CHIP,
-                rgb(0xF1, 0xF1, 0xF5),
+                t.surf_hover,
             );
         }
 
@@ -2161,19 +2163,21 @@ unsafe fn draw_bar(
         }
     }
 
-    round_stroke(dc, &bar, RADIUS_BAR, rgb(0xD6, 0xD6, 0xDC));
+    round_stroke(dc, &bar, RADIUS_BAR, t.surf_border);
 }
 
 /// 面板里的一个色格：圆角色块 + 描边。选中时描边加粗转深，
 /// 悬停时也加深一档——白底上的白色块没有描边就看不见了。
 unsafe fn chip_cell(dc: HDC, r: &RECT, color: u32, selected: bool, hover: bool) {
+    let t = theme::c();
     round_fill(dc, r, ui(5), color);
     let (line, w) = if selected {
-        (rgb(0x1A, 0x1A, 0x20), 2.0)
+        // 深色主题下"加深"是反的：色块本身可能是深色，描边得往亮走才看得见
+        (t.on_surf, 2.0)
     } else if hover {
-        (rgb(0x6E, 0x6E, 0x78), 1.4)
+        (t.on_surf_muted, 1.4)
     } else {
-        (rgb(0xDD, 0xDD, 0xE3), 1.0)
+        (t.field_border, 1.0)
     };
     crate::gdiplus::stroke_round(dc, r, ui(5) as f32, line, w);
 }
@@ -2235,17 +2239,26 @@ unsafe fn draw_props(
         props[props.len() - 1].0.right,
         props[0].0.bottom,
     );
-    round_fill(dc, &bar, RADIUS_BAR, rgb(0xFF, 0xFF, 0xFF));
+    let t = theme::c();
+    round_fill(dc, &bar, RADIUS_BAR, t.surf);
 
-    const ON: (u8, u8, u8) = (0x1A, 0x1A, 0x20);
-    const OFF: (u8, u8, u8) = (0x8A, 0x8A, 0x92);
+    // "开 / 关"两档：关态在深色底上不能太暗，否则看不出那里有控件
+    let split = |c: u32| {
+        (
+            (c & 0xFF) as u8,
+            ((c >> 8) & 0xFF) as u8,
+            ((c >> 16) & 0xFF) as u8,
+        )
+    };
+    let c_on = split(t.on_surf);
+    let c_off = split(t.on_surf_muted);
 
     for (i, (r, prop)) in props.iter().enumerate() {
         let cx = (r.left + r.right) / 2;
         let cy = (r.top + r.bottom) / 2;
 
         if *prop == Prop::Sep {
-            let b = CreateSolidBrush(rgb(0xD8, 0xD8, 0xDE));
+            let b = CreateSolidBrush(t.surf_sep);
             let sep = rect(cx, r.top + ui(6), cx + 1, r.bottom - ui(6));
             FillRect(dc, &sep, b);
             DeleteObject(b as HGDIOBJ);
@@ -2270,7 +2283,7 @@ unsafe fn draw_props(
                     r.bottom - ui(3),
                 ),
                 RADIUS_CELL,
-                SEL_BG,
+                t.surf_sel,
             );
         } else if hover_prop == i as i32 {
             round_fill(
@@ -2282,7 +2295,7 @@ unsafe fn draw_props(
                     r.bottom - ui(3),
                 ),
                 RADIUS_CELL,
-                rgb(0xF1, 0xF1, 0xF5),
+                t.surf_hover,
             );
         }
 
@@ -2290,7 +2303,7 @@ unsafe fn draw_props(
             Prop::Color(idx) => {
                 let d = rect(cx - ui(7), cy - ui(7), cx + ui(7), cy + ui(7));
                 round_fill(dc, &d, 8, COLORS[idx]);
-                round_stroke(dc, &d, 8, rgb(0xD8, 0xD8, 0xDE));
+                round_stroke(dc, &d, 8, t.surf_border);
             }
             Prop::Custom => {
                 // 调色板：点开就是取色面板。盘子直接染成当前颜色，
@@ -2311,19 +2324,19 @@ unsafe fn draw_props(
                 let k = (style.width.clamp(lo, hi) - lo) as f32 / (hi - lo).max(1) as f32;
                 let r = 3.5 + k * 8.0;
                 let d = rect(cx - r as i32, cy - r as i32, cx + r as i32, cy + r as i32);
-                crate::gdiplus::fill_ellipse(dc, &d, rgb(ON.0, ON.1, ON.2));
+                crate::gdiplus::fill_ellipse(dc, &d, rgb(c_on.0, c_on.1, c_on.2));
             }
             Prop::Filled => {
                 // 圆角要小：RADIUS_CHIP 在 20px 的框上会变成圆，和"圆角"图标撞车
                 let b = rect(cx - ui(6), cy - ui(6), cx + ui(6), cy + ui(6));
                 if style.filled {
-                    round_fill(dc, &b, 4, rgb(ON.0, ON.1, ON.2));
+                    round_fill(dc, &b, 4, rgb(c_on.0, c_on.1, c_on.2));
                 } else {
-                    round_stroke(dc, &b, 4, rgb(OFF.0, OFF.1, OFF.2));
+                    round_stroke(dc, &b, 4, rgb(c_off.0, c_off.1, c_off.2));
                 }
             }
             Prop::Dashed => {
-                let c = if style.dashed { ON } else { OFF };
+                let c = if style.dashed { c_on } else { c_off };
                 let pen = CreatePen(PS_SOLID, ui(2), rgb(c.0, c.1, c.2));
                 let old = SelectObject(dc, pen as HGDIOBJ);
                 // 始终画成虚线：关闭时只是变灰。原来关闭态画实线，
@@ -2337,7 +2350,7 @@ unsafe fn draw_props(
                 DeleteObject(pen as HGDIOBJ);
             }
             Prop::Bold => {
-                let c = if style.bold { ON } else { OFF };
+                let c = if style.bold { c_on } else { c_off };
                 let spec = crate::gdiplus::FontSpec::new(ui(12) as f32, true, "Segoe UI");
                 let (w, h) = crate::gdiplus::measure_text(dc, &spec, "B");
                 crate::gdiplus::draw_text(
@@ -2350,7 +2363,7 @@ unsafe fn draw_props(
                 );
             }
             Prop::Stroke => {
-                let c = if style.stroke { ON } else { OFF };
+                let c = if style.stroke { c_on } else { c_off };
                 let spec = crate::gdiplus::FontSpec::new(ui(12) as f32, true, "Segoe UI");
                 let (w, h) = crate::gdiplus::measure_text(dc, &spec, "A");
                 crate::gdiplus::text_stroke(
@@ -2364,15 +2377,15 @@ unsafe fn draw_props(
                 );
             }
             Prop::Shadow => {
-                let c = if style.shadow { ON } else { OFF };
+                let c = if style.shadow { c_on } else { c_off };
                 let front = rect(cx - ui(5), cy - ui(5), cx + ui(4), cy + ui(4));
                 let back = rect(cx - ui(2), cy - ui(2), cx + ui(7), cy + ui(7));
-                round_fill(dc, &back, 4, rgb(0xC6, 0xC6, 0xCE));
+                round_fill(dc, &back, 4, t.prop_shadow);
                 round_fill(dc, &front, 4, rgb(c.0, c.1, c.2));
             }
             Prop::Round(is_round) => {
                 let sel = style.round == is_round;
-                let c = if sel { ON } else { OFF };
+                let c = if sel { c_on } else { c_off };
                 // 圆/方选择器也走 GDI+，小圆的边缘最吃抗锯齿
                 let frame = rect(cx - ui(6), cy - ui(6), cx + ui(6), cy + ui(6));
                 let col = rgb(c.0, c.1, c.2);
@@ -2387,7 +2400,7 @@ unsafe fn draw_props(
         }
     }
 
-    round_stroke(dc, &bar, RADIUS_BAR, rgb(0xD6, 0xD6, 0xDC));
+    round_stroke(dc, &bar, RADIUS_BAR, t.surf_border);
 
     // 光标停在粗细格上时，上方浮一个当前数值
     if hover_prop >= 0 {
@@ -2985,7 +2998,7 @@ extern "system" fn overlay_wndproc(
                 let hdc = wparam as HDC;
                 // Hex 框的字不能跟着当前颜色走：选了白色就白字白底，看不见了
                 if !ov.hex_edit.is_null() && lparam as HWND == ov.hex_edit {
-                    SetTextColor(hdc, rgb(0x1A, 0x1A, 0x20));
+                    SetTextColor(hdc, theme::c().txt1);
                 } else {
                     let st = ov.styles[Tool::Text.idx()];
                     SetTextColor(hdc, st.color);
@@ -3203,6 +3216,8 @@ pub fn start() -> bool {
             crate::win::trace("overlay: already active, skip");
             return false;
         }
+        // 关着的时候系统可能换过深浅色，重新问一次再决定工具条颜色
+        crate::theme::refresh();
         let Some(screen) = capture::capture_desktop() else {
             crate::win::trace("overlay: capture_desktop failed");
             return false;
@@ -3313,7 +3328,7 @@ pub fn start() -> bool {
             text_edit: std::ptr::null_mut(),
             text_at: POINT { x: 0, y: 0 },
             edit_font: std::ptr::null_mut(),
-            icons: crate::icons::load(),
+            icons: crate::icons::load(theme::c()),
             back_dc,
             back_bmp,
             lens_dc,

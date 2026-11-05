@@ -7,6 +7,7 @@
 //! 源图是纯白线条，所以着色只要把 RGB 换掉、alpha 留着，
 //! 抗锯齿的半透明边会自然带上颜色。
 
+use crate::theme::Palette;
 use image::imageops::FilterType;
 use windows_sys::Win32::Graphics::Gdi::{
     AlphaBlend, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
@@ -23,21 +24,30 @@ pub const SIZE: i32 = 32;
 /// 每格图标的 [默认色, 选中色]。
 ///
 /// 前三个是操作按钮（复制/保存/钉住），选中色无意义，两者相同。
-/// 接着六个是标注工具，未选中深灰，选中转玫红。
+/// 接着六个是标注工具，未选中是工具条前景色，选中转玫红。
 /// 最后一格是属性条上的调色板按钮，颜色跟着当前颜色走，见 `IconSet::make`。
-const SPECS: [([u8; 3], [u8; 3]); 11] = [
-    ([0x00, 0x8F, 0xB3], [0x00, 0x8F, 0xB3]), // 复制
-    ([0xFF, 0x2E, 0x63], [0xFF, 0x2E, 0x63]), // 保存
-    ([0xD9, 0x7E, 0x00], [0xD9, 0x7E, 0x00]), // 钉住
-    ([0x45, 0x45, 0x4C], [0xFF, 0x2E, 0x63]), // 箭头
-    ([0x45, 0x45, 0x4C], [0xFF, 0x2E, 0x63]), // 矩形
-    ([0x45, 0x45, 0x4C], [0xFF, 0x2E, 0x63]), // 椭圆
-    ([0x45, 0x45, 0x4C], [0xFF, 0x2E, 0x63]), // 画笔
-    ([0x45, 0x45, 0x4C], [0xFF, 0x2E, 0x63]), // 文本
-    ([0x45, 0x45, 0x4C], [0xFF, 0x2E, 0x63]), // 橡皮
-    ([0xFF, 0x2E, 0x63], [0xFF, 0x2E, 0x63]), // 录制
-    ([0x1A, 0x1A, 0x20], [0x1A, 0x1A, 0x20]), // 调色板（属性条，兜底色）
-];
+///
+/// 颜色不能写死：工具条底色在深色主题下是深的，原先那个 #45454C 压上去就没了。
+fn specs(t: &Palette) -> [([u8; 3], [u8; 3]); 11] {
+    let rgb = |c: u32| [c as u8, (c >> 8) as u8, (c >> 16) as u8];
+    let fg = rgb(t.on_surf);
+    let ak = rgb(t.accent);
+    let copy = rgb(t.icon_copy);
+    let pin = rgb(t.icon_pin);
+    [
+        (copy, copy),                                    // 复制
+        (ak, ak),                                        // 保存
+        (pin, pin),                                      // 钉住
+        (fg, ak),                                        // 箭头
+        (fg, ak),                                        // 矩形
+        (fg, ak),                                        // 椭圆
+        (fg, ak),                                        // 画笔
+        (fg, ak),                                        // 文本
+        (fg, ak),                                        // 橡皮
+        (ak, ak),                                        // 录制
+        (fg, fg),                                        // 调色板（属性条，兜底色）
+    ]
+}
 
 pub struct Icon {
     dc: HDC,
@@ -89,7 +99,10 @@ impl IconSet {
 }
 
 /// 解码失败时返回空集合，调用方画不出图标但不会崩。
-pub fn load() -> IconSet {
+///
+/// 着色在加载时一次做完，所以要传当前色板：主题是深色时前景色得换成浅的，
+/// 否则图标在深色工具条上直接消失。遮罩每次弹出都会重新加载一次，不心疼。
+pub fn load(t: &Palette) -> IconSet {
     let Ok(sprite) = image::load_from_memory(SPRITE) else {
         return IconSet::default();
     };
@@ -99,7 +112,7 @@ pub fn load() -> IconSet {
     }
 
     let mut set = IconSet::default();
-    for (i, (base, hl)) in SPECS.iter().enumerate() {
+    for (i, (base, hl)) in specs(t).iter().enumerate() {
         let x = i as u32 * CELL;
         let cell = image::imageops::crop_imm(&sprite, x, 0, CELL, CELL).to_image();
         let scaled = image::imageops::resize(&cell, SIZE as u32, SIZE as u32, FilterType::Lanczos3);

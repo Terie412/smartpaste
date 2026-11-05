@@ -12,6 +12,7 @@ use crate::config::{
     hotkey_parts, Config, DEFAULT_MOD, DEFAULT_VK, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 use crate::gdiplus::FontSpec;
+use crate::theme::{self, Mode, MODES};
 use crate::win::{hinstance, pt_in, rect, to_wide};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -44,6 +45,14 @@ extern "system" {
 
 const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
 const DWMWCP_ROUND: i32 = 2;
+/// Win10 1809 起才有；旧系统上 DwmSetWindowAttribute 会直接返回失败，忽略即可
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+
+/// 系统切换深浅色时广播的 `WM_SETTINGCHANGE`，lParam 指向 "ImmersiveColorSet"。
+/// windows-sys 里没有这个常量名，字面值就是 0x001A。
+const WM_SETTINGCHANGE: u32 = 0x001A;
+/// 主题整体变化（换主题包、改强调色）。比 WM_SETTINGCHANGE 更粗，两个都收。
+const WM_THEMECHANGED: u32 = 0x031A;
 
 const CLASS: &str = "SmartPasteSettings";
 
@@ -66,49 +75,22 @@ const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
-// ---- 色板：直接取自应用图标 ----
-// 图标是玫红底 + 左上金黄 + 右下天青。界面只用玫红一种强调色，而且大块面
-// 就是图标原色 #FF2E63，不再压深——压深会在视觉上和图标对不上。
-// 只有两种场合要换档：浅底上的小字（原色对比度不够），以及亮粉块上的深色块。
-// 金黄只做「正在录制」的描边和顶部色带，天青只出现在色带里。
-const ROSE: u32 = rgb(0xFF, 0x2E, 0x63); // 图标主色
-const YELLOW: u32 = rgb(0xFF, 0xC3, 0x00);
-const CYAN: u32 = rgb(0x00, 0xC8, 0xFF);
-
-const BG: u32 = rgb(0xFA, 0xF7, 0xF8);
-const DIVIDER: u32 = rgb(0xEE, 0xE3, 0xE7);
-
-const TXT_1: u32 = rgb(0x22, 0x1A, 0x1D); // 主文字
-const TXT_2: u32 = rgb(0x6B, 0x5E, 0x63); // 次文字
-const TXT_3: u32 = rgb(0x96, 0x89, 0x8E); // 辅助文字
-
-const ACCENT: u32 = ROSE; // 深色主区、选中项填充
-/// 同色系压一档：浅底上的 12px 分节标题，以及亮粉块里的胶囊底。
-const ACCENT_DEEP: u32 = rgb(0xD9, 0x0A, 0x42);
-const ON_ACCENT: u32 = rgb(0xFF, 0xFF, 0xFF);
-
-const HERO_BG: u32 = ACCENT;
-const HERO_HOVER: u32 = ACCENT_DEEP;
-const HERO_TXT: u32 = rgb(0xFF, 0xFF, 0xFF);
-const HERO_MUTED: u32 = rgb(0xFF, 0xF0, 0xF4);
-const HERO_ACCENT: u32 = YELLOW;
-const HERO_OFF: u32 = rgb(0xFF, 0x9F, 0xBA);
-
-const KEY_BG: u32 = rgb(0xFF, 0xFF, 0xFF);
-const KEY_BG_HOVER: u32 = rgb(0xFF, 0xE9, 0xEF);
-const KEY_BORDER: u32 = rgb(0xEC, 0xDA, 0xE0);
-const KEY_BORDER_HOVER: u32 = ROSE;
-const KEY_TXT: u32 = rgb(0x2A, 0x1A, 0x20);
-const PLUS: u32 = rgb(0xFF, 0xC6, 0xD6);
-const HOVER_BG: u32 = rgb(0xF6, 0xEC, 0xEF);
-const SEGMENT_BG: u32 = rgb(0xF1, 0xE7, 0xEA);
+// ---- 色板 ----
+// 具体色值全部搬到 theme.rs，这里只按用途取。深色不是浅色取反：
+// 每一档都单独调过对比度，改色请改 theme::Palette，别在这里写死 rgb。
+//
+// 唯一还留在这儿的固定色是标题栏那条三色带——它是应用图标的三个颜色，
+// 属于品牌标识，不跟主题变。
+const BAND_ROSE: u32 = rgb(0xFF, 0x2E, 0x63);
+const BAND_YELLOW: u32 = rgb(0xFF, 0xC3, 0x00);
+const BAND_CYAN: u32 = rgb(0x00, 0xC8, 0xFF);
 
 /// 描边宽度要跟着缩放走。写死 1px 的话，16px 半径的圆角上会断成一节一节。
 const HAIRLINE: f32 = 1.6;
 
 // ---- 布局 ----
 const W: i32 = ui(480);
-const H: i32 = ui(598);
+const H: i32 = ui(694);
 
 const HEADER_H: i32 = ui(66);
 const PAD: i32 = ui(28);
@@ -135,7 +117,14 @@ const DIV_SAVE_Y: i32 = ui(427);
 const ASK_CY: i32 = ui(454);
 const DIV_OPEN_Y: i32 = ui(481);
 const OPEN_CY: i32 = ui(508);
-const FOOTER_Y: i32 = ui(574);
+
+// 外观放在最后一节：它是"看"的设置，跟前面几项"录/存"的行为设置分开。
+// 插在中间会让下面所有行的坐标都跟着挪，收益不值当。
+const DIV_APP_Y: i32 = ui(535);
+const APP_HEAD_Y: i32 = ui(564);
+const THEME_CY: i32 = ui(604);
+
+const FOOTER_Y: i32 = ui(670);
 
 const KEY_H: i32 = ui(36);
 const KEY_GAP: i32 = ui(20);
@@ -152,12 +141,13 @@ const TIP_DELAY_MS: u32 = 220;
 
 /// 可弹出注释的行：行中心 y + 文案。文案为空表示这一行不提示
 /// （保存位置那一行的"注释"是路径本身，属于值，不是解释）。
-const TIP_ROWS: [(i32, &str); 5] = [
+const TIP_ROWS: [(i32, &str); 6] = [
     (FPS_CY, "60 fps 更流畅，30 fps 更省资源"),
     (CD_CY, "留出切窗口、摆好位置的时间"),
     (SAVE_CY, ""),
     (ASK_CY, "关掉后直接存到上面的目录"),
     (OPEN_CY, "录完在资源管理器里定位到该文件"),
+    (THEME_CY, "跟随系统时，系统切换深浅色会自动跟上"),
 ];
 const TIP_FOOTER: &str = "组合键被其他程序占用时会自动还原。";
 /// 底部说明的图标位置：去掉了常驻文字，只留一个 i，停上去才解释
@@ -204,6 +194,8 @@ struct State {
     ask_no: RECT,
     open_yes: RECT,
     open_no: RECT,
+    /// 主题三档：浅色 / 深色 / 跟随系统
+    theme_chips: [RECT; 3],
     hand: HCURSOR,
 
     f_title: FontSpec,
@@ -286,6 +278,11 @@ pub fn open(parent: HWND) {
         let class = to_wide(CLASS);
         let title = to_wide("smartpaste 设置");
 
+        // 先按配置和系统状态定好主题，第一次 WM_PAINT 就得是对的颜色
+        let cfg = Config::load();
+        theme::set_mode(cfg.theme);
+        theme::refresh();
+
         let sw = GetSystemMetrics(SM_CXSCREEN);
         let sh = GetSystemMetrics(SM_CYSCREEN);
         let x = (sw - W) / 2;
@@ -331,11 +328,12 @@ pub fn open(parent: HWND) {
             &pref as *const i32 as *const core::ffi::c_void,
             std::mem::size_of::<i32>() as u32,
         );
+        apply_dwm_dark(hwnd);
 
         S = Some(Box::new(State {
             hwnd,
             parent,
-            cfg: Config::load(),
+            cfg,
             recording: false,
             pend_vk: 0,
             pend_mod: 0,
@@ -360,6 +358,7 @@ pub fn open(parent: HWND) {
             ask_no: rect(0, 0, 0, 0),
             open_yes: rect(0, 0, 0, 0),
             open_no: rect(0, 0, 0, 0),
+            theme_chips: [rect(0, 0, 0, 0); 3],
             hand: LoadCursorW(std::ptr::null_mut(), IDC_HAND),
 
             f_title: FontSpec::new(ui(24) as f32, true, "Microsoft YaHei"),
@@ -397,6 +396,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 } else {
                     HTCAPTION as LRESULT
                 };
+            }
+            // 系统切深浅色（或改了主题相关设置）会广播这条。
+            // 只有"跟随系统"才值得重绘，其余模式 refresh 后深浅没变，返回 false。
+            WM_SETTINGCHANGE | WM_THEMECHANGED => {
+                if theme::refresh() {
+                    apply_dwm_dark(hwnd);
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
             }
             _ => {}
         }
@@ -568,11 +576,20 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         s.cfg.save();
                         InvalidateRect(hwnd, std::ptr::null(), 0);
                     }
+                } else if let Some(m) = s
+                    .theme_chips
+                    .iter()
+                    .position(|r| pt_in(r, x, y))
+                    .map(|i| MODES[i])
+                {
+                    apply_theme(hwnd, s, m);
                 } else if !s.recording && !is_default(&s.cfg) && pt_in(&s.reset_rect, x, y) {
                     s.cfg = Config {
                         record_fps: s.cfg.record_fps,
                         record_countdown: s.cfg.record_countdown,
                         video_dir: s.cfg.video_dir.clone(),
+                        // 主题属于"外观"，恢复默认热键不该顺带把它改回跟随系统
+                        theme: s.cfg.theme,
                         ..Config::default()
                     };
                     s.cfg.save();
@@ -653,6 +670,36 @@ unsafe fn apply_hotkey(s: &mut State, vk: u32, mods: u32) {
     crate::win::trace(&format!("settings: hotkey -> {}", s.cfg.hotkey_text()));
 }
 
+/// 切换主题：落盘、立即生效、顺手让 DWM 改外框颜色。
+///
+/// 不用通知主窗口：遮罩和设置窗口都是在绘制时现读 `theme::c()`，
+/// 不存在缓存要失效。
+unsafe fn apply_theme(hwnd: HWND, s: &mut State, m: Mode) {
+    if s.cfg.theme == m {
+        return;
+    }
+    s.cfg.theme = m;
+    s.cfg.save();
+    theme::set_mode(m);
+    apply_dwm_dark(hwnd);
+    crate::win::trace(&format!("settings: theme -> {}", m.key()));
+    InvalidateRect(hwnd, std::ptr::null(), 0);
+}
+
+/// 让 DWM 按深浅色渲染外框（圆角那圈和窗口阴影）。
+///
+/// 窗口没有非客户区，所以这条只影响最外面那一圈；Win10 1809 之前的系统
+/// 没有这个属性，调用会直接失败，忽略即可。
+unsafe fn apply_dwm_dark(hwnd: HWND) {
+    let dark: i32 = if theme::dark() { 1 } else { 0 };
+    DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_USE_IMMERSIVE_DARK_MODE,
+        &dark as *const i32 as *const core::ffi::c_void,
+        std::mem::size_of::<i32>() as u32,
+    );
+}
+
 // ---- 绘制小工具 ----
 
 unsafe fn solid(dc: HDC, r: &RECT, color: u32) {
@@ -677,12 +724,13 @@ unsafe fn text_at(dc: HDC, font: FontSpec, color: u32, cx: i32, cy: i32, s: &str
 
 /// 常驻的小按钮（更改 / 打开），没有选中态。
 unsafe fn draw_button(dc: HDC, r: &RECT, label: &str, font: FontSpec) {
-    crate::gdiplus::fill_round(dc, r, ui(8) as f32, KEY_BG);
-    crate::gdiplus::stroke_round(dc, r, ui(8) as f32, KEY_BORDER, HAIRLINE);
+    let t = theme::c();
+    crate::gdiplus::fill_round(dc, r, ui(8) as f32, t.key_bg);
+    crate::gdiplus::stroke_round(dc, r, ui(8) as f32, t.key_border, HAIRLINE);
     text_at(
         dc,
         font,
-        TXT_1,
+        t.txt1,
         (r.left + r.right) / 2,
         (r.top + r.bottom) / 2,
         label,
@@ -703,43 +751,55 @@ fn ellipsize(s: &str, max: usize) -> String {
     out
 }
 
-/// 计算一组二选一分段控件的矩形，两个选项等宽。
+/// 一组等宽分段控件的矩形，整体右对齐。
+///
+/// 两档（帧率、倒计时、是否）和三档（主题）共用一套算法：宽度按最宽的标签
+/// 算，所有格子一样宽——这样切换选项时格子不会跟着文字长短跳。
 unsafe fn segment_rects(
     dc: HDC,
     right: i32,
     cy: i32,
-    left_label: &str,
-    right_label: &str,
+    labels: &[&str],
     font: FontSpec,
-) -> (RECT, RECT) {
-    let w = measure(dc, font, left_label)
-        .0
-        .max(measure(dc, font, right_label).0)
+) -> Vec<RECT> {
+    let w = labels
+        .iter()
+        .map(|l| measure(dc, font, l).0)
+        .max()
+        .unwrap_or(0)
         + ui(24);
     let h = ui(34);
     let gap = ui(4);
-    let right_rect = rect(right - w, cy - h / 2, right, cy + h / 2);
-    let left_rect = rect(right - w * 2 - gap, cy - h / 2, right - w - gap, cy + h / 2);
-    (left_rect, right_rect)
+    let n = labels.len() as i32;
+    (0..n)
+        .map(|i| {
+            let l = right - (n - i) * w - (n - 1 - i) * gap;
+            rect(l, cy - h / 2, l + w, cy + h / 2)
+        })
+        .collect()
 }
 
-/// 分段控件共用一个浅底轨道，选中项是实心墨绿，不再各自描边。
-unsafe fn draw_segment_track(dc: HDC, left: &RECT, right: &RECT) {
+/// 分段控件共用一个轨道底色，选中项是实心玫红，不再各自描边。
+unsafe fn draw_segment_track(dc: HDC, chips: &[RECT]) {
+    if chips.is_empty() {
+        return;
+    }
     let pad = ui(3);
     let track = rect(
-        left.left - pad,
-        left.top - pad,
-        right.right + pad,
-        right.bottom + pad,
+        chips[0].left - pad,
+        chips[0].top - pad,
+        chips[chips.len() - 1].right + pad,
+        chips[0].bottom + pad,
     );
-    crate::gdiplus::fill_round(dc, &track, ui(10) as f32, SEGMENT_BG);
+    crate::gdiplus::fill_round(dc, &track, ui(10) as f32, theme::c().segment_bg);
 }
 
 unsafe fn draw_chip(dc: HDC, r: &RECT, label: &str, active: bool, font: FontSpec) {
+    let t = theme::c();
     if active {
-        crate::gdiplus::fill_round(dc, r, ui(8) as f32, ACCENT);
+        crate::gdiplus::fill_round(dc, r, ui(8) as f32, t.accent);
     }
-    let color = if active { ON_ACCENT } else { TXT_2 };
+    let color = if active { t.on_accent } else { t.txt2 };
     text_at(
         dc,
         font,
@@ -778,10 +838,11 @@ unsafe fn draw_keycaps(s: &State, dc: HDC, avail: i32) -> RECT {
     }
 
     let top = HOT_KEY_CY - KEY_H / 2;
+    let t = theme::c();
     let (bg, border) = if s.hover_hot {
-        (KEY_BG_HOVER, KEY_BORDER_HOVER)
+        (t.key_bg_hover, t.key_border_hover)
     } else {
-        (KEY_BG, KEY_BORDER)
+        (t.key_bg, t.key_border)
     };
 
     let left = HOT_CX + (avail - total).max(0) / 2;
@@ -790,11 +851,11 @@ unsafe fn draw_keycaps(s: &State, dc: HDC, avail: i32) -> RECT {
         let r = rect(x, top, x + widths[i], top + KEY_H);
         crate::gdiplus::fill_round(dc, &r, ui(8) as f32, bg);
         crate::gdiplus::stroke_round(dc, &r, ui(8) as f32, border, HAIRLINE);
-        text_at(dc, s.f_key, KEY_TXT, (r.left + r.right) / 2, HOT_KEY_CY, p);
+        text_at(dc, s.f_key, t.key_txt, (r.left + r.right) / 2, HOT_KEY_CY, p);
 
         x += widths[i];
         if i + 1 < parts.len() {
-            text_at(dc, s.f_plus, PLUS, x + gap / 2, HOT_KEY_CY, "+");
+            text_at(dc, s.f_plus, t.plus, x + gap / 2, HOT_KEY_CY, "+");
             x += gap;
         }
     }
@@ -843,40 +904,42 @@ unsafe fn paint(s: &mut State) {
 }
 
 unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
-    solid(hdc, rc, BG);
+    let t = theme::c();
+    solid(hdc, rc, t.bg);
     SetBkMode(hdc, TRANSPARENT as i32);
 
     // ---- 自绘标题栏 ----
     // 顶上一条三色带，就是图标的那三种颜色，用它代替编造出来的 logo 图形。
+    // 这三种色不跟主题变：它是品牌标识，深色下也一样鲜艳。
     let band_h = ui(4);
     let b1 = (W as f32 * 0.52) as i32;
     let b2 = (W as f32 * 0.80) as i32;
-    crate::gdiplus::rect_fill(hdc, &rect(0, 0, b1, band_h), ROSE);
-    crate::gdiplus::rect_fill(hdc, &rect(b1, 0, b2, band_h), YELLOW);
-    crate::gdiplus::rect_fill(hdc, &rect(b2, 0, W, band_h), CYAN);
+    crate::gdiplus::rect_fill(hdc, &rect(0, 0, b1, band_h), BAND_ROSE);
+    crate::gdiplus::rect_fill(hdc, &rect(b1, 0, b2, band_h), BAND_YELLOW);
+    crate::gdiplus::rect_fill(hdc, &rect(b2, 0, W, band_h), BAND_CYAN);
 
-    text(hdc, s.f_title, TXT_1, PAD, ui(14), "设置");
-    text(hdc, s.f_brand, TXT_3, PAD + ui(1), ui(45), "SMARTPASTE");
+    text(hdc, s.f_title, t.txt1, PAD, ui(14), "设置");
+    text(hdc, s.f_brand, t.txt3, PAD + ui(1), ui(45), "SMARTPASTE");
 
     let close = close_rect();
     if s.hover_close {
-        crate::gdiplus::fill_round(hdc, &close, ui(8) as f32, HOVER_BG);
+        crate::gdiplus::fill_round(hdc, &close, ui(8) as f32, t.hover_bg);
     }
     let cx = (close.left + close.right) / 2;
     let cy = (close.top + close.bottom) / 2;
     let d = ui(5);
-    let cross = if s.hover_close { TXT_1 } else { TXT_2 };
+    let cross = if s.hover_close { t.txt1 } else { t.txt2 };
     crate::gdiplus::line(hdc, cx - d, cy - d, cx + d, cy + d, cross, HAIRLINE);
     crate::gdiplus::line(hdc, cx - d, cy + d, cx + d, cy - d, cross, HAIRLINE);
 
     // ---- 截图快捷键 ----
-    crate::gdiplus::fill_round(hdc, &HOT_CARD, ui(14) as f32, HERO_BG);
-    text(hdc, s.f_h1, HERO_TXT, HOT_CX, HOT_TITLE_Y, "截图快捷键");
+    crate::gdiplus::fill_round(hdc, &HOT_CARD, ui(14) as f32, t.hero_bg);
+    text(hdc, s.f_h1, t.hero_txt, HOT_CX, HOT_TITLE_Y, "截图快捷键");
 
     let (desc, desc_color) = if s.recording {
-        ("按下组合键，Esc 取消", HERO_TXT)
+        ("按下组合键，Esc 取消", t.hero_txt)
     } else {
-        ("点击键帽后按下新的组合键", HERO_MUTED)
+        ("点击键帽后按下新的组合键", t.hero_muted)
     };
     text(hdc, s.f_body, desc_color, HOT_CX, HOT_DESC_Y, desc);
 
@@ -893,14 +956,14 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     );
     s.reset_rect = reset;
     if !default && s.hover_reset {
-        crate::gdiplus::fill_round(hdc, &reset, ui(7) as f32, HERO_HOVER);
+        crate::gdiplus::fill_round(hdc, &reset, ui(7) as f32, t.hero_hover);
     }
     let reset_color = if default {
-        HERO_OFF
+        t.hero_off
     } else if s.hover_reset {
-        HERO_TXT
+        t.hero_txt
     } else {
-        HERO_MUTED
+        t.hero_muted
     };
     text_at(
         hdc,
@@ -922,12 +985,12 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
             left + pill_w,
             HOT_KEY_CY + pill_h / 2,
         );
-        crate::gdiplus::fill_round(hdc, &pill, ui(10) as f32, HERO_HOVER);
-        crate::gdiplus::stroke_round(hdc, &pill, ui(10) as f32, HERO_ACCENT, HAIRLINE);
+        crate::gdiplus::fill_round(hdc, &pill, ui(10) as f32, t.hero_hover);
+        crate::gdiplus::stroke_round(hdc, &pill, ui(10) as f32, t.hero_accent, HAIRLINE);
         text_at(
             hdc,
             s.f_action,
-            HERO_TXT,
+            t.hero_txt,
             (pill.left + pill.right) / 2,
             HOT_KEY_CY,
             "正在等待输入…",
@@ -938,45 +1001,45 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     }
 
     // ---- 录制设置：用分节和细分隔线代替重复卡片 ----
-    text(hdc, s.f_action, ACCENT_DEEP, PAD, RECORD_HEAD_Y, "录制");
+    text(hdc, s.f_action, t.accent_label, PAD, RECORD_HEAD_Y, "录制");
 
     let (_, row_title_h) = measure(hdc, s.f_h1, "录制帧率");
     // 行高就按标题算：注释不常驻，标题要在行内垂直居中。
     // 原来那句「两行居中」的基准会让整列文字都偏上，去掉注释后特别明显。
     let top = FPS_CY - row_title_h / 2;
-    text(hdc, s.f_h1, TXT_1, PAD, top, "录制帧率");
+    text(hdc, s.f_h1, t.txt1, PAD, top, "录制帧率");
     row_tip(hdc, s, 0, top + row_title_h);
 
-    let (fps30, fps60) = segment_rects(hdc, CR, FPS_CY, "30 fps", "60 fps", s.f_body);
-    s.fps30 = fps30;
-    s.fps60 = fps60;
-    draw_segment_track(hdc, &fps30, &fps60);
-    draw_chip(hdc, &fps30, "30 fps", s.cfg.record_fps == 30, s.f_body);
-    draw_chip(hdc, &fps60, "60 fps", s.cfg.record_fps == 60, s.f_body);
+    let chips = segment_rects(hdc, CR, FPS_CY, &["30 fps", "60 fps"], s.f_body);
+    s.fps30 = chips[0];
+    s.fps60 = chips[1];
+    draw_segment_track(hdc, &chips);
+    draw_chip(hdc, &s.fps30, "30 fps", s.cfg.record_fps == 30, s.f_body);
+    draw_chip(hdc, &s.fps60, "60 fps", s.cfg.record_fps == 60, s.f_body);
 
-    solid(hdc, &rect(PAD, DIV_RECORD_Y, CR, DIV_RECORD_Y + 1), DIVIDER);
+    solid(hdc, &rect(PAD, DIV_RECORD_Y, CR, DIV_RECORD_Y + 1), t.divider);
 
     let top = CD_CY - row_title_h / 2;
-    text(hdc, s.f_h1, TXT_1, PAD, top, "开始前倒计时");
+    text(hdc, s.f_h1, t.txt1, PAD, top, "开始前倒计时");
     row_tip(hdc, s, 1, top + row_title_h);
 
-    let (cd0, cd3) = segment_rects(hdc, CR, CD_CY, "立即", "3 秒", s.f_body);
-    s.cd0 = cd0;
-    s.cd3 = cd3;
-    draw_segment_track(hdc, &cd0, &cd3);
-    draw_chip(hdc, &cd0, "立即", s.cfg.record_countdown == 0, s.f_body);
-    draw_chip(hdc, &cd3, "3 秒", s.cfg.record_countdown == 3, s.f_body);
+    let chips = segment_rects(hdc, CR, CD_CY, &["立即", "3 秒"], s.f_body);
+    s.cd0 = chips[0];
+    s.cd3 = chips[1];
+    draw_segment_track(hdc, &chips);
+    draw_chip(hdc, &s.cd0, "立即", s.cfg.record_countdown == 0, s.f_body);
+    draw_chip(hdc, &s.cd3, "3 秒", s.cfg.record_countdown == 3, s.f_body);
 
     // ---- 保存设置 ----
-    text(hdc, s.f_action, ACCENT_DEEP, PAD, SAVE_HEAD_Y, "保存");
+    text(hdc, s.f_action, t.accent_label, PAD, SAVE_HEAD_Y, "保存");
 
     let top = SAVE_CY - row_title_h / 2;
-    text(hdc, s.f_h1, TXT_1, PAD, top, "保存位置");
+    text(hdc, s.f_h1, t.txt1, PAD, top, "保存位置");
     let dir = s.cfg.video_dir().display().to_string();
     text(
         hdc,
         s.f_body,
-        TXT_2,
+        t.txt2,
         PAD,
         top + row_title_h,
         &ellipsize(&dir, 34),
@@ -999,31 +1062,49 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     draw_button(hdc, &s.dir_edit, "更改", s.f_action);
     draw_button(hdc, &s.dir_open, "打开", s.f_action);
 
-    solid(hdc, &rect(PAD, DIV_SAVE_Y, CR, DIV_SAVE_Y + 1), DIVIDER);
+    solid(hdc, &rect(PAD, DIV_SAVE_Y, CR, DIV_SAVE_Y + 1), t.divider);
 
     let top = ASK_CY - row_title_h / 2;
-    text(hdc, s.f_h1, TXT_1, PAD, top, "录完询问另存为");
+    text(hdc, s.f_h1, t.txt1, PAD, top, "录完询问另存为");
     row_tip(hdc, s, 3, top + row_title_h);
 
-    let (ask_yes, ask_no) = segment_rects(hdc, CR, ASK_CY, "是", "否", s.f_body);
-    s.ask_yes = ask_yes;
-    s.ask_no = ask_no;
-    draw_segment_track(hdc, &ask_yes, &ask_no);
-    draw_chip(hdc, &ask_yes, "是", s.cfg.video_ask_save, s.f_body);
-    draw_chip(hdc, &ask_no, "否", !s.cfg.video_ask_save, s.f_body);
+    let chips = segment_rects(hdc, CR, ASK_CY, &["是", "否"], s.f_body);
+    s.ask_yes = chips[0];
+    s.ask_no = chips[1];
+    draw_segment_track(hdc, &chips);
+    draw_chip(hdc, &s.ask_yes, "是", s.cfg.video_ask_save, s.f_body);
+    draw_chip(hdc, &s.ask_no, "否", !s.cfg.video_ask_save, s.f_body);
 
-    solid(hdc, &rect(PAD, DIV_OPEN_Y, CR, DIV_OPEN_Y + 1), DIVIDER);
+    solid(hdc, &rect(PAD, DIV_OPEN_Y, CR, DIV_OPEN_Y + 1), t.divider);
 
     let top = OPEN_CY - row_title_h / 2;
-    text(hdc, s.f_h1, TXT_1, PAD, top, "录完打开目录");
+    text(hdc, s.f_h1, t.txt1, PAD, top, "录完打开目录");
     row_tip(hdc, s, 4, top + row_title_h);
 
-    let (open_yes, open_no) = segment_rects(hdc, CR, OPEN_CY, "是", "否", s.f_body);
-    s.open_yes = open_yes;
-    s.open_no = open_no;
-    draw_segment_track(hdc, &open_yes, &open_no);
-    draw_chip(hdc, &open_yes, "是", s.cfg.video_open_dir, s.f_body);
-    draw_chip(hdc, &open_no, "否", !s.cfg.video_open_dir, s.f_body);
+    let chips = segment_rects(hdc, CR, OPEN_CY, &["是", "否"], s.f_body);
+    s.open_yes = chips[0];
+    s.open_no = chips[1];
+    draw_segment_track(hdc, &chips);
+    draw_chip(hdc, &s.open_yes, "是", s.cfg.video_open_dir, s.f_body);
+    draw_chip(hdc, &s.open_no, "否", !s.cfg.video_open_dir, s.f_body);
+
+    // ---- 外观：主题 ----
+    solid(hdc, &rect(PAD, DIV_APP_Y, CR, DIV_APP_Y + 1), t.divider);
+    text(hdc, s.f_action, t.accent_label, PAD, APP_HEAD_Y, "外观");
+
+    let top = THEME_CY - row_title_h / 2;
+    text(hdc, s.f_h1, t.txt1, PAD, top, "主题");
+    row_tip(hdc, s, 5, top + row_title_h);
+
+    let labels: Vec<&str> = MODES.iter().map(|m| m.label()).collect();
+    let chips = segment_rects(hdc, CR, THEME_CY, &labels, s.f_body);
+    for (i, r) in chips.iter().enumerate() {
+        s.theme_chips[i] = *r;
+    }
+    draw_segment_track(hdc, &chips);
+    for (i, m) in MODES.iter().enumerate() {
+        draw_chip(hdc, &chips[i], m.label(), s.cfg.theme == *m, s.f_body);
+    }
 
     // ---- 页脚：只留 i 图标，说明改成悬浮 ----
     let icon_size = ui(13);
@@ -1031,9 +1112,9 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
     let icon_top = FOOTER_Y + (footer_h - icon_size) / 2;
     let icon = rect(PAD, icon_top, PAD + icon_size, icon_top + icon_size);
     let icon_color = if s.hover_row == Some(TIP_ROWS.len()) {
-        ACCENT_DEEP
+        t.accent_label
     } else {
-        TXT_2
+        t.txt2
     };
     crate::gdiplus::ellipse(hdc, &icon, icon_color, HAIRLINE);
     text_at(
@@ -1045,7 +1126,7 @@ unsafe fn paint_content(s: &mut State, hdc: HDC, rc: &RECT) {
         "i",
     );
     if s.tip_row == Some(TIP_ROWS.len()) {
-        text(hdc, s.f_body, TXT_2, PAD + ui(18), FOOTER_Y, TIP_FOOTER);
+        text(hdc, s.f_body, t.txt2, PAD + ui(18), FOOTER_Y, TIP_FOOTER);
     }
 }
 
@@ -1059,7 +1140,7 @@ unsafe fn row_tip(hdc: HDC, s: &State, row: usize, y: i32) {
     if tip.is_empty() {
         return;
     }
-    text(hdc, s.f_body, TXT_2, PAD, y, tip);
+    text(hdc, s.f_body, theme::c().txt2, PAD, y, tip);
 }
 
 pub fn register() {
